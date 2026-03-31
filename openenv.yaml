@@ -1,0 +1,13 @@
+name: "openenv-auctioneer"
+version: "0.1.0"
+description: "An RL agent acts as an autonomous Account Manager, navigating RTB auctions and assembling contextual creatives to maximize ROAS."
+tasks:
+  - id: "easy_headline"
+    difficulty: "easy"
+    description: "Select the headline with the highest historical CTR for the given context."
+  - id: "medium_pacing"
+    difficulty: "medium"
+    description: "Pace budget across a 24-hour cycle to avoid premature exhaustion while maximizing conversions."
+  - id: "hard_assembly"
+    difficulty: "hard"
+    description: "Assemble multimodal creatives that align with viral trends and win competitive auctions."
