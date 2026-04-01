@@ -1,68 +1,210 @@
-import os
+
+"""
+baseline.py — LLM-powered baseline agent for OpenEnv Creative Auctioneer
+(Updated to use Gemini API instead of OpenAI)
+"""
+
 import json
-from openai import OpenAI
+import os
+import sys
+import textwrap
+import requests
+from typing import Optional
+
 from environment import OpenEnvAuctioneer
 from models import Action
 
-client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
+# ---------------------------------------------------------------------------
+# Gemini API Setup
+# ---------------------------------------------------------------------------
 
-def run_agent(task_id: str):
-    print(f"\n{'='*40}\nStarting Task: {task_id}\n{'='*40}")
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
+GEMINI_URL = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}"
+
+# ---------------------------------------------------------------------------
+# Catalog
+# ---------------------------------------------------------------------------
+
+CATALOG = textwrap.dedent("""
+    ╔══════════════════ HEADLINES CATALOG ══════════════════╗
+    ║ ID │ Text                                              ║
+    ╠════╪═══════════════════════════════════════════════════╣
+    ║  0 │ Push your limits every single day.               ║
+    ║  1 │ Next-generation processing power.                ║
+    ║  2 │ Elevate your everyday style.                     ║
+    ║  3 │ Level up your competitive play.                  ║
+    ║  4 │ Sustainable choices for a better tomorrow.       ║
+    ║  5 │ Uncompromising quality and elegance.             ║
+    ╚════╧═══════════════════════════════════════════════════╝
+
+    ╔══════════════════ CREATIVES CATALOG ══════════════════╗
+    ║ ID │ Image Description                                 ║
+    ╠════╪═══════════════════════════════════════════════════╣
+    ║  0 │ A runner silhouetted against a mountain sunrise. ║
+    ║  1 │ A glowing silicon microchip on a motherboard.   ║
+    ║  2 │ A model wearing a tailored coat on a city street.║
+    ║  3 │ An RGB mechanical keyboard in a dark room.       ║
+    ║  4 │ Product packaging from recycled kraft paper.     ║
+    ║  5 │ A gold watch resting on black velvet.            ║
+    ╚════╧═══════════════════════════════════════════════════╝
+""")
+
+# ---------------------------------------------------------------------------
+# Prompts
+# ---------------------------------------------------------------------------
+
+SYSTEM_EASY = """
+You are an AI Account Manager. Your ONLY goal is to maximise CTR.
+
+Context→Best match:
+Fitness → 0 or 4, 0
+Tech → 1, 1
+Fashion → 2 or 5, 2 or 5
+Gaming → 3, 3
+
+Keep bids modest (0.30–0.80)
+""".strip()
+
+SYSTEM_MEDIUM = """
+You are focused on BUDGET PACING.
+
+Rules:
+- Start with $50 for 24h
+- ≥$10 remaining at hour 18
+- Hours 18–22 → aggressive
+- Hours 0–17 → conservative
+- If < $5 early → bid 0
+""".strip()
+
+SYSTEM_HARD = """
+Optimise for VIRAL TREND ALIGNMENT.
+
+- Generate caption ≤12 words
+- Include trend keywords
+- Match context + trend
+- Bid $0.60–$1.50
+""".strip()
+
+SYSTEM_PROMPTS = {
+    "easy_headline": SYSTEM_EASY,
+    "medium_pacing": SYSTEM_MEDIUM,
+    "hard_assembly": SYSTEM_HARD,
+}
+
+# ---------------------------------------------------------------------------
+# Prompt Builder
+# ---------------------------------------------------------------------------
+
+def build_user_prompt(task_id: str, obs, catalog: str) -> str:
+    base = (
+        f"Hour: {obs.hour_of_day:02d}:00 | "
+        f"Context: {obs.current_context} | "
+        f"Viral Trend: '{obs.viral_trend}'\n"
+        f"Budget remaining: ${obs.remaining_budget}\n\n"
+        f"{catalog}\n\n"
+    )
+
+    schema = (
+        'Respond ONLY with VALID JSON.\n'
+        '{"bid_price": <float>, "headline_id": <int>, "creative_id": <int>'
+    )
+
+    if task_id == "hard_assembly":
+        schema += ', "generated_caption": "<string>"'
+
+    schema += "}"
+
+    return base + schema
+
+# ---------------------------------------------------------------------------
+# Gemini Call
+# ---------------------------------------------------------------------------
+
+def call_llm(system: str, user: str) -> dict:
+    prompt = system + "\n\n" + user
+
+    payload = {
+        "contents": [
+            {
+                "parts": [{"text": prompt}]
+            }
+        ],
+        "generationConfig": {
+            "temperature": 0.2
+        }
+    }
+
+    response = requests.post(GEMINI_URL, json=payload)
+    result = response.json()
+
+    try:
+        text = result["candidates"][0]["content"]["parts"][0]["text"]
+
+        # Extract JSON safely
+        start = text.find("{")
+        end = text.rfind("}") + 1
+        json_str = text[start:end]
+
+        return json.loads(json_str)
+
+    except Exception:
+        print("Gemini error:", result)
+        return {"bid_price": 0.5, "headline_id": 0, "creative_id": 0}
+
+# ---------------------------------------------------------------------------
+# Runner
+# ---------------------------------------------------------------------------
+
+def run_task(task_id: str) -> float:
+    print(f"\nRunning: {task_id}")
+
     env = OpenEnvAuctioneer(task_id=task_id)
     obs = env.reset()
     done = False
-    
-    # Provide the catalog to the agent
-    catalog = f"""
-    Headlines Catalog:
-    0: "Push your limits every single day."
-    1: "Next-generation processing power."
-    2: "Elevate your everyday style."
-    3: "Level up your competitive play."
-    4: "Sustainable choices for a better tomorrow."
-    5: "Uncompromising quality and elegance."
-    
-    Creatives Catalog:
-    0: "[Image: A runner silhouetted against a mountain sunrise.]"
-    1: "[Image: A glowing silicon microchip on a motherboard.]"
-    2: "[Image: A model wearing a tailored coat on a city street.]"
-    3: "[Image: An RGB mechanical keyboard in a dark room.]"
-    4: "[Image: Product packaging made from recycled kraft paper.]"
-    5: "[Image: A gold watch resting on black velvet.]"
-    """
-    
+    system_prompt = SYSTEM_PROMPTS[task_id]
+
+    final_info = None
+
     while not done:
-        print(f"[{obs.hour_of_day}:00] Budget: ${obs.remaining_budget} | Context: {obs.current_context} | Trend: {obs.viral_trend}")
-        
-        prompt = f"""
-        You are an AI Account Manager. 
-        Current Context: {obs.current_context}. Viral Trend: {obs.viral_trend}.
-        Budget remaining: ${obs.remaining_budget}. Hour: {obs.hour_of_day}.
-        Prices peak around hour 12 and 18.
-        
-        {catalog}
-        
-        Select the headline_id and creative_id that best align semantically with the user's current context and trend.
-        Respond ONLY with a JSON object matching this schema:
-        {{"bid_price": <float>, "headline_id": <int 0-5>, "creative_id": <int 0-5>}}
-        """
+        user_prompt = build_user_prompt(task_id, obs, CATALOG)
+        action_data = call_llm(system_prompt, user_prompt)
 
-        response = client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[{"role": "user", "content": prompt}],
-            response_format={ "type": "json_object" }
+        action = Action(
+            bid_price=float(action_data.get("bid_price", 0.5)),
+            headline_id=int(action_data.get("headline_id", 0)),
+            creative_id=int(action_data.get("creative_id", 0)),
+            generated_caption=action_data.get("generated_caption", None),
         )
-        
-        action_data = json.loads(response.choices[0].message.content)
-        action = Action(**action_data)
-        
-        obs, reward, done, info = env.step(action)
-        print(f"  -> Action: Bid ${action.bid_price}, Head: {action.headline_id}, Creative: {action.creative_id}")
-        print(f"  -> Reward: {reward} | Revenue so far: ${info.total_revenue}\n")
 
-    print(f"Task Complete! Final Score: {info.task_score}/1.0")
+        obs, reward, done, info = env.step(action)
+        final_info = info
+
+        print(
+            f"[{obs.hour_of_day:02d}] bid={action.bid_price:.2f} "
+            f"rev=${info.total_revenue:.2f} score={info.task_score:.3f}"
+        )
+
+    print(f"Final Score: {final_info.task_score:.4f}")
+    return final_info.task_score
+
+# ---------------------------------------------------------------------------
+# Entry
+# ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
-    run_agent("easy_headline")
-    run_agent("medium_pacing")
-    run_agent("hard_assembly")
+    task_arg = os.environ.get("TASK", "all").lower()
+
+    if task_arg == "all":
+        tasks = ["easy_headline", "medium_pacing", "hard_assembly"]
+    else:
+        tasks = [task_arg]
+
+    scores = {}
+
+    for t in tasks:
+        scores[t] = run_task(t)
+
+    print("\nSummary:")
+    for t, s in scores.items():
+        print(f"{t}: {s:.4f}")
+

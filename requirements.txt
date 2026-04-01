@@ -4,3 +4,28 @@ sentence-transformers>=2.2.2
 numpy>=1.24.0
 fastapi
 uvicorn
+
+# Core
+pydantic>=2.0.0
+numpy>=1.24.0
+
+# LLM agent / baseline
+openai>=1.0.0
+
+# User Simulator (semantic layer — always active)
+sentence-transformers>=2.2.2
+torch>=2.0.0
+
+# Optional: LLM-based User Simulator (activate with USE_LLM_SIMULATOR=1)
+# Uncomment if running on GPU with ≥16 GB VRAM
+# transformers>=4.40.0
+# bitsandbytes>=0.43.0
+# accelerate>=0.29.0
+
+# Optional: true CLIP scoring for hard_assembly grader
+# Uncomment when Pitt image files are available
+# open-clip-torch>=2.24.0
+
+# Serving (optional)
+fastapi>=0.110.0
+uvicorn>=0.29.0
