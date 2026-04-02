@@ -51,6 +51,15 @@ class Observation(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# Reward  (The scalar feedback for the agent)
+# ---------------------------------------------------------------------------
+
+class Reward(BaseModel):
+    value: float = Field(..., 
+        description="The scalar reward value for this step.")
+
+
+# ---------------------------------------------------------------------------
 # Action  (what the agent *does* each step)
 # ---------------------------------------------------------------------------
 

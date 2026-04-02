@@ -1,4 +1,3 @@
-
 #TODO: add specific headlines for easy task and mak eit to output htat headline
 #TODO:download datasets/hso them elsewhere and source them here and check the compatibility of the datasets
 """
@@ -51,7 +50,7 @@ from typing import Dict, List, Optional, Tuple
 import numpy as np
 from sentence_transformers import SentenceTransformer, util
 
-from models import Action, Info, Observation
+from models import Action, Info, Observation, Reward
 
 # ---------------------------------------------------------------------------
 # Paths — datasets should be mounted here inside Docker; absent → fallback
@@ -645,6 +644,10 @@ class OpenEnvAuctioneer:
         self._trends   = ["Quiet Luxury", "Eco-Friendly", "Cyberpunk", "Minimalism"]
 
     # -----------------------------------------------------------------------
+    def state(self) -> Observation:
+        return self._make_obs()
+
+    # -----------------------------------------------------------------------
     def reset(self) -> Observation:
         self._step           = 0
         self._budget_init    = self._BUDGETS[self.task_id]
@@ -663,10 +666,10 @@ class OpenEnvAuctioneer:
         return self._make_obs()
 
     # -----------------------------------------------------------------------
-    def step(self, action: Action) -> Tuple[Observation, float, bool, Info]:
+    def step(self, action: Action) -> Tuple[Observation, Reward, bool, Info]:
         # Guard: episode already over
         if self._remaining <= 0:
-            return self._make_obs(), 0.0, True, self._make_info(0.0, 0.0, False, 0.0, 0.0, 0.0)
+            return self._make_obs(), Reward(value=0.0), True, self._make_info(0.0, 0.0, False, 0.0, 0.0, 0.0)
 
         clearing_price = self._market.sample_clearing_price(self._step)
         step_reward    = 0.0
@@ -730,7 +733,7 @@ class OpenEnvAuctioneer:
         info = self._make_info(
             clearing_price, raw_ctr, auction_won, adjusted_ctr,
             clip_score, spent)
-        return self._make_obs(), round(step_reward, 2), done, info
+        return self._make_obs(), Reward(value=round(step_reward, 2)), done, info
 
     # -----------------------------------------------------------------------
     # Internal helpers
