@@ -1,10 +1,3 @@
-pydantic>=2.0.0
-openai>=1.0.0
-sentence-transformers>=2.2.2
-numpy>=1.24.0
-fastapi
-uvicorn
-
 # Core
 pydantic>=2.0.0
 numpy>=1.24.0
@@ -16,6 +9,11 @@ openai>=1.0.0
 sentence-transformers>=2.2.2
 torch>=2.0.0
 
+# MIND dataset — Option A (HuggingFace streaming, no local disk)
+# Standard library urllib is used for direct TSV download (no extra deps needed).
+# Uncomment below ONLY if you want the full HuggingFace datasets library instead:
+# datasets>=2.18.0
+
 # Optional: LLM-based User Simulator (activate with USE_LLM_SIMULATOR=1)
 # Uncomment if running on GPU with ≥16 GB VRAM
 # transformers>=4.40.0
@@ -23,7 +21,6 @@ torch>=2.0.0
 # accelerate>=0.29.0
 
 # Optional: true CLIP scoring for hard_assembly grader
-# Uncomment when Pitt image files are available
 # open-clip-torch>=2.24.0
 
 # Serving (optional)

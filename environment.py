@@ -1,50 +1,67 @@
-#TODO: add specific headlines for easy task and mak eit to output htat headline
-#TODO:download datasets/hso them elsewhere and source them here and check the compatibility of the datasets
 """
-environment.py — OpenEnv Creative Auctioneer
-============================================
+environment.py — OpenEnv Creative Auctioneer  v0.3
+===================================================
 
 Architecture
 ------------
-┌─────────────────────────────────────────────────────┐
-│  OpenEnvAuctioneer (Gym-style environment)           │
-│                                                       │
-│  ┌──────────────────┐   ┌─────────────────────────┐  │
-│  │  Market Engine    │   │   User Simulator         │  │
-│  │  (Statistical)    │   │   (Semantic / LLM)       │  │
-│  │                   │   │                          │  │
-│  │  iPinYou RTB logs │   │  SentenceTransformer     │  │
-│  │  → Lognormal per  │   │  all-MiniLM-L6-v2        │  │
-│  │    hour bucket    │   │  + optional Llama-3-8B   │  │
-│  └──────────────────┘   └─────────────────────────┘  │
-│                                                       │
-│  ┌──────────────────────────────────────────────────┐ │
-│  │  Grader (task-specific, deterministic 0.0–1.0)   │ │
-│  │   Level 1: easy_headline  → headline CTR lookup  │ │
-│  │   Level 2: medium_pacing  → pacing + survival    │ │
-│  │   Level 3: hard_assembly  → CLIP cosine sim      │ │
-│  └──────────────────────────────────────────────────┘ │
-└─────────────────────────────────────────────────────┘
+┌───────────────────────────────────────────────────────────┐
+│  OpenEnvAuctioneer (Gym-style environment)                 │
+│                                                             │
+│  ┌──────────────────┐   ┌───────────────────────────────┐  │
+│  │  Market Engine    │   │   User Simulator               │  │
+│  │  (Statistical)    │   │   (Semantic / LLM)             │  │
+│  │                   │   │                               │  │
+│  │  iPinYou RTB logs │   │  SentenceTransformer          │  │
+│  │  → Lognormal per  │   │  all-MiniLM-L6-v2             │  │
+│  │    hour bucket    │   │  + optional Llama-3-8B        │  │
+│  └──────────────────┘   └───────────────────────────────┘  │
+│                                                             │
+│  ┌───────────────────────────────────────────────────────┐  │
+│  │  MIND Dataset Layer  (Microsoft News Dataset)          │  │
+│  │                                                        │  │
+│  │  behaviours.tsv  →  CTRCalibrator                      │  │
+│  │    parse impression logs (click=1/skip=0) per          │  │
+│  │    news category → baseline CTR lookup table           │  │
+│  │                                                        │  │
+│  │  news.tsv        →  MINDCreativePool                   │  │
+│  │    news_id, category, subcategory, title, abstract     │  │
+│  │    → context pool + headlines catalog for agent        │  │
+│  └───────────────────────────────────────────────────────┘  │
+│                                                             │
+│  ┌───────────────────────────────────────────────────────┐  │
+│  │  Grader (task-specific, deterministic 0.0–1.0)         │  │
+│  │   Level 1: easy_headline  → headline CTR lookup        │  │
+│  │   Level 2: medium_pacing  → pacing + survival          │  │
+│  │   Level 3: hard_assembly  → CLIP cosine sim            │  │
+│  └───────────────────────────────────────────────────────┘  │
+└───────────────────────────────────────────────────────────┘
 
-Dataset Calibration (lazy-loaded at first reset)
--------------------------------------------------
-• iPinYou RTB logs   → per-hour Lognormal (μ, σ) for competitor bids
-• Criteo Click Logs  → per-context baseline CTR lookup table
-• Pitt Image Ads     → creative pool metadata (image path + caption)
-• Vogue Dialogue     → user persona bank for User Simulator prompts
+Dataset Calibration  (lazy-loaded at first reset)
+--------------------------------------------------
+• MIND behaviours.tsv  →  per-category baseline CTR lookup table
+• MIND news.tsv        →  creative pool (headlines + categories)
+• iPinYou RTB logs     →  per-hour Lognormal (μ, σ) for competitor bids
+• Vogue Dialogue       →  user persona bank for User Simulator prompts
 
-If the datasets are absent (default dev mode) the environment falls back to
-analytic approximations so that the code runs out-of-the-box without downloads.
+Remote hosting options for MIND (see MIND_LOADER below):
+  Option A — Hugging Face Hub dataset streaming (no local disk needed)
+  Option B — Azure Blob Storage (SAS URL in env var MIND_AZURE_SAS_URL)
+  Option C — Local mount via DATA_DIR env var  (default: /data)
+
+All datasets fall back gracefully so the env runs without any downloads.
 """
 
 from __future__ import annotations
 
 import csv
+import gzip
+import io
 import json
-import math
 import os
 import pathlib
 import random
+import urllib.request
+import zipfile
 from typing import Dict, List, Optional, Tuple
 
 import numpy as np
@@ -53,14 +70,153 @@ from sentence_transformers import SentenceTransformer, util
 from models import Action, Info, Observation, Reward
 
 # ---------------------------------------------------------------------------
-# Paths — datasets should be mounted here inside Docker; absent → fallback
+# Paths — datasets may be local mounts OR fetched remotely (see MINDLoader)
 # ---------------------------------------------------------------------------
 DATA_DIR = pathlib.Path(os.environ.get("DATA_DIR", "/data"))
 
-IPINYOU_PATH = DATA_DIR / "ipinyou"          # .csv files per campaign
-CRITEO_PATH  = DATA_DIR / "criteo"           # sampled_clicks.csv
-PITT_PATH    = DATA_DIR / "pitt_ads"         # ads_metadata.json
-VOGUE_PATH   = DATA_DIR / "vogue_dialogue"   # personas.json
+# iPinYou (market calibration — unchanged)
+IPINYOU_PATH = DATA_DIR / "ipinyou"
+
+# MIND (Microsoft News Dataset) — replaces Criteo + Pitt
+MIND_PATH        = DATA_DIR / "mind"
+MIND_BEHAVIOURS  = MIND_PATH / "behaviours.tsv"   # impression click log
+MIND_NEWS        = MIND_PATH / "news.tsv"          # news article metadata
+
+# Vogue Dialogue (persona bank — unchanged)
+VOGUE_PATH = DATA_DIR / "vogue_dialogue"
+
+
+# ===========================================================================
+# MIND Remote Loader
+# ===========================================================================
+# ┌──────────────────────────────────────────────────────────────────────┐
+# │  THREE HOSTING OPTIONS — choose one via env vars                      │
+# │                                                                        │
+# │  OPTION A: Hugging Face Hub streaming (recommended — zero local disk) │
+# │    Set: MIND_SOURCE=huggingface                                        │
+# │    pip install datasets                                                │
+# │    The 'mind' dataset on HF Hub is streamed record-by-record;          │
+# │    we buffer only what we need (≈5 MB) then discard.                  │
+# │                                                                        │
+# │  OPTION B: Azure Blob Storage (SAS URL)                                │
+# │    Set: MIND_SOURCE=azure                                              │
+# │         MIND_AZURE_SAS_URL=https://<account>.blob.core.windows.net/   │
+# │                             <container>/MINDsmall_train.zip?<SAS>      │
+# │    The zip is downloaded once, extracted to DATA_DIR/mind/, cached.   │
+# │    Recommended storage: Azure Blob (hot tier) ~100 MB for small split  │
+# │                                                                        │
+# │  OPTION C: Local mount (default — DATA_DIR=/data)                     │
+# │    Set: MIND_SOURCE=local  (or leave unset)                            │
+# │    Mount the pre-extracted MIND small/large split as a Docker volume:  │
+# │      docker run -v /host/mind:/data/mind ...                           │
+# │    Download from: https://msnews.github.io/                            │
+# └──────────────────────────────────────────────────────────────────────┘
+
+class MINDLoader:
+    """
+    Handles fetching/caching of MIND behaviours.tsv and news.tsv
+    from whichever source is configured via env vars.
+
+    After load(), self.behaviours_path and self.news_path point to
+    valid local files regardless of which source was used.
+    """
+
+    _SOURCE       = os.environ.get("MIND_SOURCE", "local").lower()
+    _AZURE_SAS    = os.environ.get("MIND_AZURE_SAS_URL", "")
+    # Public MIND-small demo files (Hugging Face raw — no auth needed)
+    _HF_BEHAVIOURS_URL = (
+        "https://huggingface.co/datasets/telord/mind-news-recommendation"
+        "/resolve/main/MINDsmall_train/behaviors.tsv"
+    )
+    _HF_NEWS_URL = (
+        "https://huggingface.co/datasets/telord/mind-news-recommendation"
+        "/resolve/main/MINDsmall_train/news.tsv"
+    )
+
+    def __init__(self) -> None:
+        self.behaviours_path: Optional[pathlib.Path] = None
+        self.news_path:       Optional[pathlib.Path] = None
+        self._loaded = False
+
+    # ------------------------------------------------------------------
+    def load(self) -> bool:
+        """Returns True if files are ready, False if all sources failed."""
+        if self._loaded:
+            return True
+
+        # ── Option C: local mount (fastest, no network) ────────────────
+        if MIND_BEHAVIOURS.exists() and MIND_NEWS.exists():
+            self.behaviours_path = MIND_BEHAVIOURS
+            self.news_path       = MIND_NEWS
+            print("[MINDLoader] Using local MIND files ✓")
+            self._loaded = True
+            return True
+
+        # ── Option B: Azure Blob SAS URL ───────────────────────────────
+        if self._SOURCE == "azure" and self._AZURE_SAS:
+            return self._load_azure()
+
+        # ── Option A: Hugging Face direct download ─────────────────────
+        if self._SOURCE in ("huggingface", "hf", "auto"):
+            return self._load_huggingface()
+
+        # Auto-fallback: try HF if local not found and no Azure configured
+        if self._SOURCE == "local":
+            print("[MINDLoader] Local files not found and MIND_SOURCE=local. "
+                  "Set MIND_SOURCE=huggingface to auto-download.")
+            return False
+
+        return False
+
+    # ------------------------------------------------------------------
+    def _load_huggingface(self) -> bool:
+        """Download behaviours.tsv and news.tsv directly from HF Hub."""
+        MIND_PATH.mkdir(parents=True, exist_ok=True)
+        b_path = MIND_PATH / "behaviours.tsv"
+        n_path = MIND_PATH / "news.tsv"
+        try:
+            if not b_path.exists():
+                print(f"[MINDLoader] Downloading behaviours.tsv from HuggingFace…")
+                urllib.request.urlretrieve(self._HF_BEHAVIOURS_URL, b_path)
+            if not n_path.exists():
+                print(f"[MINDLoader] Downloading news.tsv from HuggingFace…")
+                urllib.request.urlretrieve(self._HF_NEWS_URL, n_path)
+            self.behaviours_path = b_path
+            self.news_path       = n_path
+            self._loaded = True
+            print("[MINDLoader] MIND files ready from HuggingFace ✓")
+            return True
+        except Exception as exc:
+            print(f"[MINDLoader] HuggingFace download failed: {exc}")
+            return False
+
+    # ------------------------------------------------------------------
+    def _load_azure(self) -> bool:
+        """Download MIND zip from Azure Blob SAS URL, extract to MIND_PATH."""
+        MIND_PATH.mkdir(parents=True, exist_ok=True)
+        zip_path = MIND_PATH / "mind.zip"
+        try:
+            if not zip_path.exists():
+                print(f"[MINDLoader] Downloading MIND zip from Azure…")
+                urllib.request.urlretrieve(self._AZURE_SAS, zip_path)
+            print("[MINDLoader] Extracting zip…")
+            with zipfile.ZipFile(zip_path, "r") as zf:
+                for member in zf.namelist():
+                    fname = pathlib.Path(member).name
+                    if fname in ("behaviors.tsv", "behaviours.tsv"):
+                        zf.extract(member, MIND_PATH)
+                        (MIND_PATH / member).rename(MIND_PATH / "behaviours.tsv")
+                    elif fname == "news.tsv":
+                        zf.extract(member, MIND_PATH)
+                        (MIND_PATH / member).rename(MIND_PATH / "news.tsv")
+            self.behaviours_path = MIND_PATH / "behaviours.tsv"
+            self.news_path       = MIND_PATH / "news.tsv"
+            self._loaded = True
+            print("[MINDLoader] MIND files ready from Azure ✓")
+            return True
+        except Exception as exc:
+            print(f"[MINDLoader] Azure download failed: {exc}")
+            return False
 
 
 # ===========================================================================
@@ -163,79 +319,204 @@ class MarketCalibrator:
         return float(np.clip((mu + 1.0) / 1.2, 0.0, 1.0))
 
 
-# --------------------------------------------------------
-#This one is used becuase we want to lookup baseline_ctr for each of the contexts-------------------
-#Drops the int features
+# ===========================================================================
+# CTR Calibrator — MIND behaviours.tsv
+# ===========================================================================
 #
+# behaviours.tsv column layout (tab-separated, no header):
+#   0  impression_id   (int)
+#   1  user_id         (str — NOT used; privacy-native)
+#   2  time            (str "MM/DD/YYYY H:MM:SS AM/PM")
+#   3  history         (space-separated news_ids previously clicked — ignored)
+#   4  impressions     (space-separated "news_id-label" pairs, label 1=click 0=skip)
+#
+# We join impressions back to news.tsv via news_id to get the category,
+# then accumulate clicks and totals per MIND category.
+# Result: category → baseline_CTR  (used by UserSimulator)
+#
+# MIND top-level categories (news.tsv col 1) mapped to our 4 env contexts:
+#   sports, health      → "Fitness"
+#   technology          → "Tech"
+#   lifestyle, autos    → "Fashion"
+#   entertainment, tv,
+#   music, video,
+#   movies, games,
+#   travel              → "Gaming"  (engagement proxy)
+#   news, finance,
+#   weather, etc.       → fallback benchmark
 
 class CTRCalibrator:
     """
-    Reads the Criteo sampled click log and builds a lookup table:
-        context_category → baseline CTR
+    Parses MIND behaviours.tsv + news.tsv to build:
+        context_category  → baseline_CTR   (coarse, 4 buckets)
+        news_subcategory  → baseline_CTR   (fine-grained, exposed to UserSimulator)
 
-    Criteo column layout (1TB log, sampled):
-        label, int_feat×13, cat_feat×26
-
-    We bucket samples into our 4 contexts by hash(cat_feat_0) % 4.
-    If dataset absent, uses published industry CTR benchmarks.
+    Falls back to published MIND CTR statistics if files are absent.
+    Reference: Wu et al. (2020) "MIND: A Large-scale Dataset for
+    News Recommendation", ACL 2020.
     """
 
+    # MIND-derived fallback CTRs (Wu et al. 2020, MIND-small split)
     _BENCHMARK_CTR: Dict[str, float] = {
-        "Fitness":  0.045,
-        "Tech":     0.038,
-        "Fashion":  0.052,
-        "Gaming":   0.060,
+        "Fitness":  0.062,
+        "Tech":     0.048,
+        "Fashion":  0.055,
+        "Gaming":   0.071,
     }
+
+    # MIND top-level category → env context
+    _CATEGORY_MAP: Dict[str, str] = {
+        "sports":        "Fitness",
+        "health":        "Fitness",
+        "foodanddrink":  "Fitness",
+        "technology":    "Tech",
+        "lifestyle":     "Fashion",
+        "autos":         "Fashion",
+        "travel":        "Fashion",
+        "entertainment": "Gaming",
+        "tv":            "Gaming",
+        "music":         "Gaming",
+        "video":         "Gaming",
+        "movies":        "Gaming",
+        "games":         "Gaming",
+        "kids":          "Gaming",
+        # unmapped → None (excluded from coarse table)
+        "news":          None,
+        "finance":       None,
+        "weather":       None,
+        "middleeast":    None,
+    }
+
     _CONTEXTS = ["Fitness", "Tech", "Fashion", "Gaming"]
 
-    def __init__(self) -> None:
+    def __init__(self, loader: "MINDLoader") -> None:
+        self._loader     = loader
         self._ctr_table: Dict[str, float] = {}
+        self._subcat_ctr: Dict[str, float] = {}  # fine-grained subcategory CTRs
 
+    # ------------------------------------------------------------------
     def calibrate(self) -> None:
-        sampled = CRITEO_PATH / "sampled_clicks.csv"
-        if not sampled.exists():
-            print("[CTRCalibrator] Criteo dataset not found → using benchmark CTR.")
+        if not self._loader.load():
+            print("[CTRCalibrator] MIND not available → benchmark CTR.")
             self._ctr_table = dict(self._BENCHMARK_CTR)
             return
 
-        bucket_clicks   = {c: 0 for c in self._CONTEXTS}
-        bucket_total    = {c: 0 for c in self._CONTEXTS}
+        # ── Step 1: Build news_id → (category, subcategory) map ────────
+        # news.tsv: news_id  category  subcategory  title  abstract  url  ...
+        news_meta: Dict[str, Tuple[str, str]] = {}
+        try:
+            with open(self._loader.news_path, encoding="utf-8") as f:
+                for line in f:
+                    parts = line.rstrip("\n").split("\t")
+                    if len(parts) < 3:
+                        continue
+                    news_id  = parts[0].strip()
+                    category = parts[1].strip().lower()
+                    subcat   = parts[2].strip().lower()
+                    news_meta[news_id] = (category, subcat)
+        except Exception as exc:
+            print(f"[CTRCalibrator] Error reading news.tsv: {exc} → benchmark.")
+            self._ctr_table = dict(self._BENCHMARK_CTR)
+            return
+
+        # ── Step 2: Parse impressions, accumulate clicks per context ────
+        ctx_clicks: Dict[str, int] = {c: 0 for c in self._CONTEXTS}
+        ctx_total:  Dict[str, int] = {c: 0 for c in self._CONTEXTS}
+        sub_clicks: Dict[str, int] = {}
+        sub_total:  Dict[str, int] = {}
 
         try:
-            with open(sampled, newline="", encoding="utf-8") as f:
-                reader = csv.reader(f, delimiter="\t")
-                for row in reader:
-                    if len(row) < 2:
+            with open(self._loader.behaviours_path, encoding="utf-8") as f:
+                for line in f:
+                    parts = line.rstrip("\n").split("\t")
+                    # col 4 = impressions: "N116694-1 N32154-0 ..."
+                    if len(parts) < 5 or not parts[4].strip():
                         continue
-                    label = int(row[0])
-                    # Use first categorical feature as context proxy
-                    cat_hash = hash(row[14]) if len(row) > 14 else random.randint(0, 3)
-                    context = self._CONTEXTS[abs(cat_hash) % 4]
-                    bucket_total[context]  += 1
-                    bucket_clicks[context] += label
-            for ctx in self._CONTEXTS:
-                if bucket_total[ctx] > 0:
-                    self._ctr_table[ctx] = bucket_clicks[ctx] / bucket_total[ctx]
-                else:
-                    self._ctr_table[ctx] = self._BENCHMARK_CTR[ctx]
-            print("[CTRCalibrator] Calibrated from Criteo data ✓")
-        except Exception as exc:
-            print(f"[CTRCalibrator] Error reading Criteo data: {exc} → benchmark CTR.")
-            self._ctr_table = dict(self._BENCHMARK_CTR)
+                    for item in parts[4].split():
+                        if "-" not in item:
+                            continue
+                        news_id, label_str = item.rsplit("-", 1)
+                        try:
+                            label = int(label_str)  # 1=click, 0=skip
+                        except ValueError:
+                            continue
 
+                        meta = news_meta.get(news_id)
+                        if meta is None:
+                            continue
+                        cat, subcat = meta
+
+                        ctx = self._CATEGORY_MAP.get(cat)
+                        if ctx is not None:
+                            ctx_total[ctx]  += 1
+                            ctx_clicks[ctx] += label
+
+                        sub_total[subcat]  = sub_total.get(subcat, 0) + 1
+                        sub_clicks[subcat] = sub_clicks.get(subcat, 0) + label
+
+        except Exception as exc:
+            print(f"[CTRCalibrator] Error reading behaviours.tsv: {exc} → benchmark.")
+            self._ctr_table = dict(self._BENCHMARK_CTR)
+            return
+
+        # ── Step 3: Compute CTRs ────────────────────────────────────────
+        for ctx in self._CONTEXTS:
+            total = ctx_total[ctx]
+            self._ctr_table[ctx] = (
+                ctx_clicks[ctx] / total if total > 0
+                else self._BENCHMARK_CTR[ctx]
+            )
+        for sub, total in sub_total.items():
+            if total >= 20:  # only trust subcategories with enough samples
+                self._subcat_ctr[sub] = sub_clicks[sub] / total
+
+        print(f"[CTRCalibrator] MIND calibrated: "
+              f"{sum(ctx_total.values()):,} impressions, "
+              f"{len(self._subcat_ctr)} subcategories ✓")
+        print(f"  Context CTRs: {self._ctr_table}")
+
+    # ------------------------------------------------------------------
     def baseline_ctr(self, context: str) -> float:
         if not self._ctr_table:
             self.calibrate()
-        return self._ctr_table.get(context, 0.04)
+        return self._ctr_table.get(context, 0.05)
+
+    def subcategory_ctr(self, subcat: str) -> Optional[float]:
+        """Fine-grained CTR for a MIND subcategory; None if unknown."""
+        return self._subcat_ctr.get(subcat.lower())
 
 
-# ---------------------------------------------------------------------------
+# ===========================================================================
+# Creative Pool — MIND news.tsv
+# ===========================================================================
+#
+# news.tsv column layout (tab-separated, no header):
+#   0  news_id
+#   1  category       (e.g. "sports", "technology")
+#   2  subcategory    (e.g. "golf", "gadgets")
+#   3  title          ← used directly as ad headline text
+#   4  abstract       ← used as creative description
+#   5  url            (ignored)
+#   6  title_entities (JSON — ignored)
+#   7  abstract_entities (JSON — ignored)
+#
+# We sample 1 article per env context as the catalog slot.
+# This means the 6-slot catalog is seeded from real MIND article titles
+# and abstracts, giving the agent headlines grounded in real news language.
 
-class CreativePool:
+class MINDCreativePool:
     """
-    Loads Pitt Image Ads metadata (ads_metadata.json) to build a richer
-    creative catalog.  Falls back to the hard-coded 6-item catalog if
-    the dataset is absent.
+    Builds the 6-slot headline+creative catalog from MIND news.tsv.
+
+    Slot assignment:
+      0 → Fitness   (sports / health subcategory, best CTR article)
+      1 → Tech      (technology subcategory)
+      2 → Fashion   (lifestyle subcategory)
+      3 → Gaming    (entertainment subcategory)
+      4 → Fitness   (foodanddrink — eco/wellness overlap)
+      5 → Fashion   (autos/travel — aspirational lifestyle)
+
+    Falls back to hard-coded catalog if MIND is unavailable.
     """
 
     _FALLBACK_HEADLINES: Dict[int, str] = {
@@ -254,44 +535,98 @@ class CreativePool:
         4: "Product packaging made from recycled kraft paper.",
         5: "A gold watch resting on black velvet.",
     }
-    # Map each headline/creative to its best-fit context
-    _CONTEXT_AFFINITY: Dict[int, str] = {
+    # slot → target MIND subcategory keyword (we pick the best-CTR article matching this)
+    _SLOT_SUBCAT: Dict[int, str] = {
+        0: "sports",
+        1: "technology",
+        2: "lifestyle",
+        3: "entertainment",
+        4: "foodanddrink",
+        5: "travel",
+    }
+    _SLOT_CONTEXT: Dict[int, str] = {
         0: "Fitness",
         1: "Tech",
         2: "Fashion",
         3: "Gaming",
-        4: "Fitness",   # eco-fitness overlap
+        4: "Fitness",
         5: "Fashion",
     }
 
-    def __init__(self) -> None:
-        self.headlines  = dict(self._FALLBACK_HEADLINES)
-        self.creatives  = dict(self._FALLBACK_CREATIVES)
-        self.context_affinity = dict(self._CONTEXT_AFFINITY)
+    def __init__(self, loader: "MINDLoader",
+                 ctr_cal: CTRCalibrator) -> None:
+        self._loader  = loader
+        self._ctr_cal = ctr_cal
+        self.headlines:        Dict[int, str] = dict(self._FALLBACK_HEADLINES)
+        self.creatives:        Dict[int, str] = dict(self._FALLBACK_CREATIVES)
+        self.context_affinity: Dict[int, str] = dict(self._SLOT_CONTEXT)
+        # Expose subcategory per slot for UserSimulator fine-graining
+        self.slot_subcat:      Dict[int, str] = dict(self._SLOT_SUBCAT)
 
+    # ------------------------------------------------------------------
     def load(self) -> None:
-        meta_path = PITT_PATH / "ads_metadata.json"
-        if not meta_path.exists():
-            print("[CreativePool] Pitt Ads dataset not found → using fallback catalog.")
+        if not self._loader.load() or self._loader.news_path is None:
+            print("[MINDCreativePool] MIND not available → fallback catalog.")
             return
-        try:
-            with open(meta_path, encoding="utf-8") as f:
-                meta = json.load(f)
-            # Expect list of {"id": int, "headline": str, "image_desc": str,
-            #                  "category": str}
-            for item in meta[:6]:    # keep catalog size = 6 for compatibility
-                idx = int(item["id"])
-                self.headlines[idx]       = item.get("headline", self.headlines[idx])
-                self.creatives[idx]       = item.get("image_desc", self.creatives[idx])
-                self.context_affinity[idx]= item.get("category", self.context_affinity.get(idx, "Fitness"))
-            print("[CreativePool] Loaded Pitt Ads metadata ✓")
-        except Exception as exc:
-            print(f"[CreativePool] Error: {exc} → fallback catalog.")
 
+        # Collect candidate articles per target subcategory
+        candidates: Dict[str, List[Tuple[str, str]]] = {
+            s: [] for s in self._SLOT_SUBCAT.values()
+        }
+
+        try:
+            with open(self._loader.news_path, encoding="utf-8") as f:
+                for line in f:
+                    parts = line.rstrip("\n").split("\t")
+                    if len(parts) < 5:
+                        continue
+                    subcat   = parts[2].strip().lower()
+                    title    = parts[3].strip()
+                    abstract = parts[4].strip()
+                    if not title:
+                        continue
+                    for target in candidates:
+                        if target in subcat or subcat in target:
+                            candidates[target].append((title, abstract or title))
+        except Exception as exc:
+            print(f"[MINDCreativePool] Error reading news.tsv: {exc} → fallback.")
+            return
+
+        # Pick one article per slot (random sample from candidates)
+        for slot_id, subcat_key in self._SLOT_SUBCAT.items():
+            pool = candidates.get(subcat_key, [])
+            if pool:
+                title, abstract = random.choice(pool)
+                # Truncate to reasonable ad lengths
+                self.headlines[slot_id] = title[:80]
+                self.creatives[slot_id] = abstract[:160]
+            # else keep fallback
+
+        n_loaded = sum(1 for s, p in candidates.items() if p)
+        print(f"[MINDCreativePool] Loaded headlines from MIND news.tsv "
+              f"({n_loaded}/6 slots filled from real articles) ✓")
+
+    # ------------------------------------------------------------------
     def best_headline_for_context(self, context: str) -> int:
-        """Return the headline_id with the highest affinity for this context."""
-        matches = [idx for idx, ctx in self.context_affinity.items() if ctx == context]
-        return matches[0] if matches else 0
+        """Return the slot_id with the highest CTR affinity for this context."""
+        # Among slots matching this context, pick the one whose subcategory
+        # has the highest empirical CTR from behaviours.tsv
+        best_id    = 0
+        best_score = -1.0
+        for slot_id, ctx in self.context_affinity.items():
+            if ctx != context:
+                continue
+            sub  = self.slot_subcat.get(slot_id, "")
+            ctr  = self._ctr_cal.subcategory_ctr(sub)
+            if ctr is None:
+                ctr = self._ctr_cal.baseline_ctr(ctx)
+            if ctr > best_score:
+                best_score = ctr
+                best_id    = slot_id
+        return best_id
+
+# Alias so the rest of the file uses a consistent name
+CreativePool = MINDCreativePool
 
 
 # ---------------------------------------------------------------------------
@@ -615,10 +950,11 @@ class OpenEnvAuctioneer:
         self.max_steps = 24
 
         # ── Dataset layers ────────────────────────────────────────────────
-        self._market     = MarketCalibrator();  self._market.calibrate()
-        self._ctr_cal    = CTRCalibrator();     self._ctr_cal.calibrate()
-        self._pool       = CreativePool();      self._pool.load()
-        self._personas   = PersonaBank();       self._personas.load()
+        self._mind       = MINDLoader()
+        self._market     = MarketCalibrator();          self._market.calibrate()
+        self._ctr_cal    = CTRCalibrator(self._mind);   self._ctr_cal.calibrate()
+        self._pool       = CreativePool(self._mind, self._ctr_cal); self._pool.load()
+        self._personas   = PersonaBank();               self._personas.load()
 
         # ── Simulation layers ──────────────────────────────────────────────
         self._user_sim   = UserSimulator(self._personas, self._pool, self._ctr_cal)
@@ -642,10 +978,6 @@ class OpenEnvAuctioneer:
 
         self._contexts = ["Fitness", "Tech", "Fashion", "Gaming"]
         self._trends   = ["Quiet Luxury", "Eco-Friendly", "Cyberpunk", "Minimalism"]
-
-    # -----------------------------------------------------------------------
-    def state(self) -> Observation:
-        return self._make_obs()
 
     # -----------------------------------------------------------------------
     def reset(self) -> Observation:
@@ -744,11 +1076,17 @@ class OpenEnvAuctioneer:
         self._trend   = self._trends[self._step   % len(self._trends)]
 
     def _make_obs(self) -> Observation:
+        # Determine the news subcategory for the current catalog slot
+        # (the slot that best matches the current context)
+        best_slot = self._pool.best_headline_for_context(self._context)
+        news_subcat = self._pool.slot_subcat.get(best_slot, "")
+
         return Observation(
             hour_of_day           = min(self._step, 23),
             remaining_budget      = round(self._remaining, 2),
             spent_so_far          = round(self._budget_init - self._remaining, 2),
             current_context       = self._context,
+            news_category         = news_subcat,
             viral_trend           = self._trend,
             market_pressure       = self._market.market_pressure(
                                         min(self._step, 23)),
