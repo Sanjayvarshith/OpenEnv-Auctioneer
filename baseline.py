@@ -12,7 +12,7 @@ Usage
 
 Optional env vars
 -----------------
-  TASK          = easy_headline | medium_pacing | hard_assembly | all  (default: all)
+  TASK          = easy_headline | medium_pacing | hard_assembly | hard_sequencing | all  (default: all)
   USE_LLM_SIMULATOR = 1   to enable Llama-3 User Simulator (requires GPU + model)
 """
 
@@ -29,7 +29,7 @@ from models import Action
 
 client = OpenAI(
     base_url="https://openrouter.ai/api/v1",
-    api_key="KEY",
+    api_key="key",
 )
 
 # ---------------------------------------------------------------------------
@@ -110,10 +110,25 @@ Also choose headline_id and creative_id that reinforce the caption theme.
 Bid competitively ($0.60–$1.50) since revenue matters too.
 """.strip()
 
+SYSTEM_HARD_SEQ = """
+You are focused on CROSS-CONTEXT CAMPAIGN SEQUENCING.
+
+Rules:
+- Plan ad placements across 24 hours to maximise conversions.
+- Winning an auction boosts CTR for the next 3 hours (carry-over effect):
+    +15% at t+1, +10% at t+2, +5% at t+3.
+- Cover at least 3 of 4 contexts (Fitness, Tech, Fashion, Gaming) for a 20% bonus.
+- Skip expensive hours; bid aggressively in cheap hours to trigger carry-over.
+- Use carryover_boost from observation to time high-value bids.
+- Keep ≥15% budget for hours 18–22 (peak engagement).
+- Your score is compared against a DP oracle that finds the hindsight-optimal plan.
+""".strip()
+
 SYSTEM_PROMPTS = {
-    "easy_headline":  SYSTEM_EASY,
-    "medium_pacing":  SYSTEM_MEDIUM,
-    "hard_assembly":  SYSTEM_HARD,
+    "easy_headline":   SYSTEM_EASY,
+    "medium_pacing":   SYSTEM_MEDIUM,
+    "hard_assembly":   SYSTEM_HARD,
+    "hard_sequencing": SYSTEM_HARD_SEQ,
 }
 
 
@@ -128,9 +143,11 @@ def build_user_prompt(task_id: str, obs, catalog: str) -> str:
         f"Viral Trend: '{obs.viral_trend}'\n"
         f"Budget remaining: ${obs.remaining_budget} | "
         f"Market pressure: {obs.market_pressure:.2f} | "
-        f"Fatigue level: {obs.fatigue_level:.2f}\n\n"
-        f"{catalog}\n\n"
+        f"Fatigue level: {obs.fatigue_level:.2f}"
     )
+    if task_id == "hard_sequencing":
+        base += f" | Carryover boost: {obs.carryover_boost:.2f}"
+    base += f"\n\n{catalog}\n\n"
 
     schema = (
         'Respond ONLY with a JSON object:\n'
@@ -209,6 +226,10 @@ def run_task(task_id: str) -> float:
     elif task_id == "hard_assembly":
         print(f"  CLIP Similarity Score    : {final_info.clip_similarity_score:.4f}")
         print(f"  Revenue Factor           : ${final_info.total_revenue:.2f}")
+    elif task_id == "hard_sequencing":
+        print(f"  Sequencing Score         : {final_info.sequencing_score:.4f}")
+        print(f"  Contexts Covered         : {final_info.contexts_covered}/4")
+        print(f"  Diversity Multiplier     : {final_info.diversity_multiplier:.2f}")
     print(f"{'─'*52}\n")
 
     return final_info.task_score
@@ -222,11 +243,11 @@ if __name__ == "__main__":
     task_arg = os.environ.get("TASK", "all").lower()
 
     if task_arg == "all":
-        tasks = ["easy_headline", "medium_pacing", "hard_assembly"]
-    elif task_arg in ("easy_headline", "medium_pacing", "hard_assembly"):
+        tasks = ["easy_headline", "medium_pacing", "hard_assembly", "hard_sequencing"]
+    elif task_arg in ("easy_headline", "medium_pacing", "hard_assembly", "hard_sequencing"):
         tasks = [task_arg]
     else:
-        print(f"Unknown TASK='{task_arg}'. Choose: easy_headline | medium_pacing | hard_assembly | all")
+        print(f"Unknown TASK='{task_arg}'. Choose: easy_headline | medium_pacing | hard_assembly | hard_sequencing | all")
         sys.exit(1)
 
     scores = {}
@@ -243,4 +264,3 @@ if __name__ == "__main__":
         print(f"╠{'═'*50}╣")
         print(f"║  {'AVERAGE':<20} {'█'*int(avg*20) + '░'*(20-int(avg*20))}  {avg:.4f} ║")
     print("╚══════════════════════════════════════════════════╝")
-

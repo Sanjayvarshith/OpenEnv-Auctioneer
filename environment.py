@@ -78,7 +78,7 @@ DATA_DIR = pathlib.Path(__file__).parent.resolve() / "Datasets"
 IPINYOU_PATH = DATA_DIR
 
 # MIND (Microsoft News Dataset) — replaces Criteo + Pitt
-MIND_PATH        = DATA_DIR / "MINDlarge_train" / "MINDlarge_train"
+MIND_PATH        = DATA_DIR / "MINDlarge_train"
 MIND_BEHAVIOURS  = MIND_PATH / "behaviors.tsv"   # impression click log
 MIND_NEWS        = MIND_PATH / "news.tsv"          # news article metadata
 
@@ -913,6 +913,129 @@ class HardAssemblyGrader:
         self._scores.clear()
 
 
+# ---------------------------------------------------------------------------
+
+class HardSequencingGrader:
+    """
+    Level 4: Cross-Context Campaign Sequencing
+
+    Tracks per-step data (clearing prices, CTRs, contexts, costs) and at
+    episode end runs a DP oracle to find the optimal bid/skip sequence.
+
+    Score = min(1.0, (agent_conversions / oracle_conversions) x diversity_mult)
+    """
+
+    CARRYOVER_BOOSTS = [0.15, 0.10, 0.05]   # t+1, t+2, t+3
+    DIVERSITY_THRESHOLD = 3
+    DIVERSITY_BONUS = 1.20
+
+    def __init__(self) -> None:
+        self._step_log: List[dict] = []
+        self._contexts_won: set = set()
+
+    def record_step(self, step: int, context: str, clearing_price: float,
+                    base_ctr: float, auction_won: bool, cost: float,
+                    conversion_value: float) -> None:
+        self._step_log.append({
+            "step": step, "context": context,
+            "clearing_price": clearing_price,
+            "base_ctr": base_ctr,
+            "auction_won": auction_won,
+            "cost": cost,
+            "conversion_value": conversion_value,
+        })
+        if auction_won:
+            self._contexts_won.add(context)
+
+    # ------------------------------------------------------------------
+    def _diversity_multiplier(self) -> float:
+        return (self.DIVERSITY_BONUS
+                if len(self._contexts_won) >= self.DIVERSITY_THRESHOLD
+                else 1.0)
+
+    # ------------------------------------------------------------------
+    def _agent_conversions(self) -> float:
+        """Total weighted conversions the agent actually achieved."""
+        total = 0.0
+        for idx, s in enumerate(self._step_log):
+            if not s["auction_won"]:
+                continue
+            boost = 0.0
+            for j, bv in enumerate(self.CARRYOVER_BOOSTS):
+                prev = idx - 1 - j
+                if prev >= 0 and self._step_log[prev]["auction_won"]:
+                    boost += bv
+            eff_ctr = s["base_ctr"] * (1.0 + boost)
+            total += eff_ctr * s["conversion_value"]
+        return total
+
+    # ------------------------------------------------------------------
+    def _oracle_conversions(self, budget: float) -> float:
+        """
+        DP over N steps.
+        State = (step_index, budget_units, carry_state).
+        carry_state is a 3-bit int encoding wins at t-1, t-2, t-3.
+        """
+        steps = self._step_log
+        n = len(steps)
+        if n == 0:
+            return 0.0
+
+        RES = 0.10
+        budget_units = int(budget / RES) + 1
+
+        # cur maps (budget_units, carry_state_3bit) -> best cumulative value
+        cur: Dict[tuple, float] = {(budget_units, 0): 0.0}
+
+        for i in range(n):
+            s = steps[i]
+            cp = s["clearing_price"]
+            base = s["base_ctr"]
+            cv = s["conversion_value"]
+            cost_u = max(1, int(round(cp / RES)))
+
+            nxt: Dict[tuple, float] = {}
+
+            for (bu, cs), val in cur.items():
+                w1 = (cs >> 2) & 1
+                w2 = (cs >> 1) & 1
+                w3 = cs & 1
+                boost = 0.15 * w1 + 0.10 * w2 + 0.05 * w3
+
+                # Option A: skip
+                ns_skip = ((w1 << 1) | w2) & 0b111
+                key_s = (bu, ns_skip)
+                if key_s not in nxt or val > nxt[key_s]:
+                    nxt[key_s] = val
+
+                # Option B: bid (if affordable)
+                if bu >= cost_u:
+                    eff = base * (1.0 + boost)
+                    nv = val + eff * cv
+                    nb = bu - cost_u
+                    ns_bid = ((1 << 2) | (w1 << 1) | w2) & 0b111
+                    key_b = (nb, ns_bid)
+                    if key_b not in nxt or nv > nxt[key_b]:
+                        nxt[key_b] = nv
+
+            cur = nxt
+
+        return max(cur.values()) if cur else 0.0
+
+    # ------------------------------------------------------------------
+    def episode_score(self, initial_budget: float) -> float:
+        oracle = self._oracle_conversions(initial_budget)
+        if oracle <= 0:
+            return 0.0
+        agent = self._agent_conversions()
+        div = self._diversity_multiplier()
+        return min(1.0, round((agent / oracle) * div, 4))
+
+    def reset(self) -> None:
+        self._step_log.clear()
+        self._contexts_won.clear()
+
+
 # ===========================================================================
 # Main Environment
 # ===========================================================================
@@ -939,9 +1062,10 @@ class OpenEnvAuctioneer:
 
     # Per-task initial budgets
     _BUDGETS = {
-        "easy_headline":  100.0,
+        "easy_headline":   100.0,
         "medium_pacing":   50.0,
-        "hard_assembly":  100.0,
+        "hard_assembly":   100.0,
+        "hard_sequencing": 100.0,
     }
 
     def __init__(self, task_id: str = "easy_headline") -> None:
@@ -964,6 +1088,7 @@ class OpenEnvAuctioneer:
         self._easy_grader   = EasyHeadlineGrader(self._user_sim, self._pool)
         self._medium_grader = MediumPacingGrader()
         self._hard_grader   = HardAssemblyGrader(self._user_sim._smodel)
+        self._seq_grader    = HardSequencingGrader()
 
         # ── Episode state (populated by reset) ────────────────────────────
         self._step            = 0
@@ -976,6 +1101,8 @@ class OpenEnvAuctioneer:
         self._context         = ""
         self._trend           = ""
         self._prev_remaining  = 0.0
+        self._carryover_boost = 0.0
+        self._carryover_schedule: Dict[int, float] = {}
 
         self._contexts = ["Fitness", "Tech", "Fashion", "Gaming"]
         self._trends   = ["Quiet Luxury", "Eco-Friendly", "Cyberpunk", "Minimalism"]
@@ -994,6 +1121,9 @@ class OpenEnvAuctioneer:
         self._easy_grader.reset()
         self._medium_grader.reset()
         self._hard_grader.reset()
+        self._seq_grader.reset()
+        self._carryover_boost = 0.0
+        self._carryover_schedule = {}
 
         self._update_context()
         return self._make_obs()
@@ -1003,6 +1133,10 @@ class OpenEnvAuctioneer:
         # Guard: episode already over
         if self._remaining <= 0:
             return self._make_obs(), Reward(value=0.0), True, self._make_info(0.0, 0.0, False, 0.0, 0.0, 0.0)
+
+        # ── Read carry-over boost for hard_sequencing ─────────────────
+        if self.task_id == "hard_sequencing":
+            self._carryover_boost = self._carryover_schedule.get(self._step, 0.0)
 
         clearing_price = self._market.sample_clearing_price(self._step)
         step_reward    = 0.0
@@ -1022,9 +1156,22 @@ class OpenEnvAuctioneer:
 
             raw_ctr, adjusted_ctr = self._user_sim.compute_ctr(
                 action, self._context, self._trend, self._fatigue)
-            self._last_ctr = adjusted_ctr
 
-            revenue       = adjusted_ctr * self.CONVERSION_VALUE
+            # Apply carry-over boost for hard_sequencing
+            if self.task_id == "hard_sequencing":
+                effective_ctr = round(adjusted_ctr * (1.0 + self._carryover_boost), 4)
+                self._last_ctr = effective_ctr
+                revenue = effective_ctr * self.CONVERSION_VALUE
+                # Schedule carry-over boosts for future steps
+                for ci, bv in enumerate(HardSequencingGrader.CARRYOVER_BOOSTS):
+                    fs = self._step + 1 + ci
+                    if fs < 24:
+                        self._carryover_schedule[fs] = (
+                            self._carryover_schedule.get(fs, 0.0) + bv)
+            else:
+                self._last_ctr = adjusted_ctr
+                revenue = adjusted_ctr * self.CONVERSION_VALUE
+
             self._total_revenue += revenue
             step_reward   = revenue - clearing_price
             self._fatigue = min(1.0, self._fatigue + self.FATIGUE_STEP)
@@ -1055,6 +1202,13 @@ class OpenEnvAuctioneer:
             clip_score = self._hard_grader.score_step(caption_text, self._trend)
         else:
             clip_score = 0.0
+
+        if self.task_id == "hard_sequencing":
+            self._seq_grader.record_step(
+                step=self._step, context=self._context,
+                clearing_price=clearing_price, base_ctr=adjusted_ctr,
+                auction_won=auction_won, cost=spent,
+                conversion_value=self.CONVERSION_VALUE)
 
         # ── Advance time ─────────────────────────────────────────────────
         self._prev_remaining  = self._remaining
@@ -1093,6 +1247,7 @@ class OpenEnvAuctioneer:
                                         min(self._step, 23)),
             ads_shown_this_session= self._ads_shown,
             fatigue_level         = round(self._fatigue, 3),
+            carryover_boost       = round(min(self._carryover_boost, 0.30), 4),
             last_ctr              = self._last_ctr,
             cumulative_revenue    = round(self._total_revenue, 2),
         )
@@ -1113,13 +1268,30 @@ class OpenEnvAuctioneer:
             pacing_score       = task_score
             clip_sim_score     = 0.0
 
-        else:  # hard_assembly
+        elif self.task_id == "hard_assembly":
             clip_sim_score     = self._hard_grader.episode_score()
             revenue_factor     = float(np.clip(self._total_revenue / 45.0, 0.0, 1.0))
             # Blend: 60% viral alignment + 40% revenue
             task_score         = round(0.6 * clip_sim_score + 0.4 * revenue_factor, 4)
             headline_score     = 0.0
             pacing_score       = 0.0
+
+        else:  # hard_sequencing
+            seq_sc             = self._seq_grader.episode_score(self._budget_init)
+            task_score         = seq_sc
+            headline_score     = 0.0
+            pacing_score       = 0.0
+            clip_sim_score     = 0.0
+
+        # Sequencing sub-scores (non-zero only for hard_sequencing)
+        if self.task_id == "hard_sequencing":
+            _seq_score = task_score
+            _ctx_cov   = len(self._seq_grader._contexts_won)
+            _div_mult  = self._seq_grader._diversity_multiplier()
+        else:
+            _seq_score = 0.0
+            _ctx_cov   = 0
+            _div_mult  = 1.0
 
         return Info(
             task_id                 = self.task_id,
@@ -1133,4 +1305,7 @@ class OpenEnvAuctioneer:
             headline_alignment_score= headline_score,
             pacing_score            = pacing_score,
             clip_similarity_score   = clip_sim_score,
+            sequencing_score        = _seq_score,
+            contexts_covered        = _ctx_cov,
+            diversity_multiplier    = _div_mult,
         )

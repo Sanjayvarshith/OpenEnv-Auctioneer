@@ -53,6 +53,24 @@ tasks:
       score_range: [0.0, 1.0]
       target_score: 0.65
 
+  - id: "hard_sequencing"
+    difficulty: "hard"
+    initial_budget_usd: 100.0
+    description: >
+      Plan a 24-hour sequence of ad placements across Fitness, Tech, Fashion,
+      and Gaming contexts. Winning an auction triggers carry-over brand-recall
+      boosts (+15%/+10%/+5% CTR) for the next 3 hours. Cover >=3 contexts for
+      a 20% diversity bonus. Graded against DP oracle.
+    grader:
+      type: "HardSequencingGrader"
+      formula: "min(1.0, (agent_conversions / oracle_conversions) x diversity_multiplier)"
+      components:
+        agent_conversions:      "sum(adjusted_ctr x conversion_value) for won auctions"
+        oracle_conversions:     "DP-optimal bid/skip sequence with carry-over"
+        diversity_multiplier:   "1.2 if >=3 distinct contexts served, else 1.0"
+      score_range: [0.0, 1.0]
+      target_score: 0.60
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Datasets
 # ─────────────────────────────────────────────────────────────────────────────
