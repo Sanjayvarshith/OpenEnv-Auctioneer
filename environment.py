@@ -72,14 +72,14 @@ from models import Action, Info, Observation, Reward
 # ---------------------------------------------------------------------------
 # Paths — datasets may be local mounts OR fetched remotely (see MINDLoader)
 # ---------------------------------------------------------------------------
-DATA_DIR = pathlib.Path(os.environ.get("DATA_DIR", "/data"))
+DATA_DIR = pathlib.Path(__file__).parent.resolve() / "Datasets"
 
 # iPinYou (market calibration — unchanged)
-IPINYOU_PATH = DATA_DIR / "ipinyou"
+IPINYOU_PATH = DATA_DIR
 
 # MIND (Microsoft News Dataset) — replaces Criteo + Pitt
-MIND_PATH        = DATA_DIR / "mind"
-MIND_BEHAVIOURS  = MIND_PATH / "behaviours.tsv"   # impression click log
+MIND_PATH        = DATA_DIR / "MINDlarge_train" / "MINDlarge_train"
+MIND_BEHAVIOURS  = MIND_PATH / "behaviors.tsv"   # impression click log
 MIND_NEWS        = MIND_PATH / "news.tsv"          # news article metadata
 
 # Vogue Dialogue (persona bank — unchanged)
