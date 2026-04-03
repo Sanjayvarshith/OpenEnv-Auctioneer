@@ -23,6 +23,7 @@ torch>=2.0.0
 # Optional: true CLIP scoring for hard_assembly grader
 # open-clip-torch>=2.24.0
 
-# Serving (optional)
+# Serving / inference client
+httpx>=0.25.0
 fastapi>=0.110.0
 uvicorn>=0.29.0

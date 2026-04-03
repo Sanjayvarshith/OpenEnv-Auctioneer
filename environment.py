@@ -1129,6 +1129,26 @@ class OpenEnvAuctioneer:
         return self._make_obs()
 
     # -----------------------------------------------------------------------
+    def state(self) -> dict:
+        """Return a serialisable snapshot of the current environment state."""
+        return {
+            "task_id":          self.task_id,
+            "step":             self._step,
+            "max_steps":        self.max_steps,
+            "initial_budget":   self._budget_init,
+            "remaining_budget": round(self._remaining, 2),
+            "spent_so_far":     round(self._budget_init - self._remaining, 2),
+            "total_revenue":    round(self._total_revenue, 2),
+            "fatigue_level":    round(self._fatigue, 3),
+            "ads_shown":        self._ads_shown,
+            "current_context":  self._context,
+            "current_trend":    self._trend,
+            "last_ctr":         self._last_ctr,
+            "carryover_boost":  round(self._carryover_boost, 4),
+            "done":             self._step >= self.max_steps or self._remaining <= 0,
+        }
+
+    # -----------------------------------------------------------------------
     def step(self, action: Action) -> Tuple[Observation, Reward, bool, Info]:
         # Guard: episode already over
         if self._remaining <= 0:
