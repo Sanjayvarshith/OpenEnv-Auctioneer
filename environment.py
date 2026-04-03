@@ -789,6 +789,7 @@ class UserSimulator:
 # Graders  (deterministic, 0.0 – 1.0)
 # ===========================================================================
 
+#easy_headline
 class EasyHeadlineGrader:
     """
     Level 1: Headline Selection
