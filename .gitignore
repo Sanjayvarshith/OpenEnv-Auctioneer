@@ -25,6 +25,7 @@ share/python-wheels/
 .installed.cfg
 *.egg
 MANIFEST
+enc/
 
 # PyInstaller
 #  Usually these files are written by a python script from a template
@@ -74,6 +75,7 @@ docs/_build/
 # PyBuilder
 .pybuilder/
 target/
+enc/
 
 # Jupyter Notebook
 .ipynb_checkpoints
@@ -205,3 +207,7 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+Datasets/MINDlarge_train/
+Datasets/iPinYou.csv
+Datasets/Coco/
+*.zip

@@ -1,13 +1,173 @@
 name: "openenv-auctioneer"
-version: "0.1.0"
-description: "An RL agent acts as an autonomous Account Manager, navigating RTB auctions and assembling contextual creatives to maximize ROAS."
+version: "0.3.0"
+description: >
+  An RL agent acts as an autonomous "Account Manager," navigating a 24-hour
+  RTB auction cycle and assembling contextual ad creatives to maximise ROAS —
+  all without access to individual user identifiers (Privacy-Native design).
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Tasks
+# ─────────────────────────────────────────────────────────────────────────────
 tasks:
+
   - id: "easy_headline"
     difficulty: "easy"
-    description: "Select the headline with the highest historical CTR for the given context."
+    initial_budget_usd: 100.0
+    description: >
+      Select the headline with the highest semantic alignment for the given
+      context/trend each hour. Graded on mean per-step headline alignment score.
+    grader:
+      type: "EasyHeadlineGrader"
+      formula: "mean( CTR_selected_t / CTR_oracle_t )  for t in [0,23]"
+      score_range: [0.0, 1.0]
+      target_score: 0.75
+
   - id: "medium_pacing"
     difficulty: "medium"
-    description: "Pace budget across a 24-hour cycle to avoid premature exhaustion while maximizing conversions."
+    initial_budget_usd: 50.0
+    description: >
+      Pace the $50 budget smoothly across 24 hours. Must retain ≥ 20% ($10)
+      when the peak-engagement window starts at hour 18.
+    grader:
+      type: "MediumPacingGrader"
+      formula: "0.3 × smoothness + 0.3 × peak_survival + 0.4 × revenue_factor"
+      components:
+        smoothness:      "1 − mean(|hourly_spend − ideal_spend| / ideal_spend)"
+        peak_survival:   "1.0 if remaining_budget ≥ 20% at hour 18 else 0.0"
+        revenue_factor:  "min(1.0, total_revenue / 30.0)"
+      score_range: [0.0, 1.0]
+      target_score: 0.70
+
   - id: "hard_assembly"
     difficulty: "hard"
-    description: "Assemble multimodal creatives that align with viral trends and win competitive auctions."
+    initial_budget_usd: 100.0
+    description: >
+      Generate captions that semantically align with the current viral trend
+      AND win competitive auctions to maximise ROAS.
+    grader:
+      type: "HardAssemblyGrader"
+      formula: "0.6 × clip_cosine_sim + 0.4 × min(1.0, total_revenue / 45.0)"
+      components:
+        clip_cosine_sim: "mean CosineSim(caption_embedding, viral_trend_embedding)"
+        revenue_factor:  "min(1.0, total_revenue / 45.0)"
+      score_range: [0.0, 1.0]
+      target_score: 0.65
+
+  - id: "hard_sequencing"
+    difficulty: "hard"
+    initial_budget_usd: 100.0
+    description: >
+      Plan a 24-hour sequence of ad placements across Fitness, Tech, Fashion,
+      and Gaming contexts. Winning an auction triggers carry-over brand-recall
+      boosts (+15%/+10%/+5% CTR) for the next 3 hours. Cover >=3 contexts for
+      a 20% diversity bonus. Graded against DP oracle.
+    grader:
+      type: "HardSequencingGrader"
+      formula: "min(1.0, (agent_conversions / oracle_conversions) x diversity_multiplier)"
+      components:
+        agent_conversions:      "sum(adjusted_ctr x conversion_value) for won auctions"
+        oracle_conversions:     "DP-optimal bid/skip sequence with carry-over"
+        diversity_multiplier:   "1.2 if >=3 distinct contexts served, else 1.0"
+      score_range: [0.0, 1.0]
+      target_score: 0.60
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Datasets
+# ─────────────────────────────────────────────────────────────────────────────
+datasets:
+
+  - name: "MIND — Microsoft News Dataset"
+    role: "CTR calibration (behaviours.tsv) + Creative Pool headlines (news.tsv)"
+    source: "https://msnews.github.io/"
+    split: "MIND-small (train)"
+    files:
+      - behaviours.tsv   # impression logs: impression_id, user_id, time, history, impressions
+      - news.tsv         # article metadata: news_id, category, subcategory, title, abstract
+    size_approx: "~70 MB (MIND-small train split)"
+    required: false      # falls back to Wu et al. 2020 benchmark CTRs
+
+    hosting_options:
+      option_A_huggingface:
+        description: "Stream directly — zero local disk needed"
+        env_vars:
+          MIND_SOURCE: "huggingface"
+        notes: >
+          behaviours.tsv and news.tsv are downloaded once from HuggingFace Hub
+          and cached under DATA_DIR/mind/. ~70 MB download on first run.
+          Subsequent runs use the cached files.
+
+      option_B_azure_blob:
+        description: "Host the MIND zip on your own Azure Blob container"
+        env_vars:
+          MIND_SOURCE: "azure"
+          MIND_AZURE_SAS_URL: "https://<account>.blob.core.windows.net/<container>/MINDsmall_train.zip?<SAS>"
+        notes: >
+          Upload MINDsmall_train.zip to an Azure Blob container, generate a
+          SAS URL (read-only, no expiry or long TTL), set the env var.
+          Recommended if you need air-gapped or private deployment.
+          Cost: ~$0.002/month storage + egress per run.
+
+      option_C_local_mount:
+        description: "Pre-downloaded files on local disk (default)"
+        env_vars:
+          MIND_SOURCE: "local"   # (or leave unset)
+          DATA_DIR: "/data"
+        notes: >
+          Download MIND-small from https://msnews.github.io/ (requires account).
+          Extract so that /data/mind/behaviours.tsv and /data/mind/news.tsv exist.
+          Mount as Docker volume: -v /host/mind:/data/mind
+
+  - name: "iPinYou Global RTB"
+    role: "Market Engine calibration (per-hour Lognormal bid distribution)"
+    source: "https://contest.ipinyou.com/"
+    mount_path: "/data/ipinyou"
+    format: "CSV (bid_id, timestamp, bidprice, payprice, …)"
+    size_approx: "~250 MB (subsampled)"
+    required: false        # falls back to analytic approximation (Zhang et al. 2014)
+
+  - name: "Vogue Dialogue Dataset"
+    role: "User Simulator persona bank"
+    mount_path: "/data/vogue_dialogue/personas.json"
+    format: "JSON [{description: str}, …]"
+    size_approx: "~50 MB"
+    required: false
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Models
+# ─────────────────────────────────────────────────────────────────────────────
+models:
+
+  user_simulator:
+    primary:
+      name: "all-MiniLM-L6-v2"
+      type: "SentenceTransformer"
+      role: "Semantic CTR scoring (always active)"
+    optional_llm:
+      name: "meta-llama/Meta-Llama-3-8B-Instruct"
+      quantisation: "4-bit (bitsandbytes)"
+      role: "Richer LLM-based CTR scoring"
+      activation: "Set env USE_LLM_SIMULATOR=1"
+      vram_req: "~6 GB (4-bit) on a single GPU"
+
+  grader_embedding:
+    name: "all-MiniLM-L6-v2"
+    note: >
+      Replace with openai/clip-vit-base-patch32 for true multimodal
+      image+text alignment scoring when Pitt image files are available.
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Environment config
+# ─────────────────────────────────────────────────────────────────────────────
+environment:
+  max_steps: 24                    # one step = one hour
+  conversion_value_usd: 15.0
+  fatigue_step: 0.015              # added per won auction
+  fatigue_decay: 0.05              # removed per lost auction
+  contexts: [Fitness, Tech, Fashion, Gaming]
+  trends:   [Quiet Luxury, Eco-Friendly, Cyberpunk, Minimalism]
+  catalog_size: 6
+
+  reward:
+    auction_win:  "adjusted_ctr × 15.0 − clearing_price"
+    auction_loss: "-0.10"
+    pacing_penalty: "-1.0  (medium_pacing only, when burn_rate > 1.5×ideal)"
