@@ -8,7 +8,7 @@ Runs inside the Docker container and exposes HTTP endpoints:
   GET  /health                       → liveness check
 """
 
-from typing import Optional
+from typing import List, Optional
 
 from fastapi import FastAPI, Query
 from pydantic import BaseModel
@@ -16,7 +16,7 @@ from pydantic import BaseModel
 from environment import OpenEnvAuctioneer
 from models import Action
 
-app = FastAPI(title="OpenEnv Creative Auctioneer", version="0.3.0")
+app = FastAPI(title="OpenEnv Creative Auctioneer", version="0.4.0")
 
 # ---------------------------------------------------------------------------
 # Global environment instance (one per container)
@@ -33,6 +33,7 @@ class StepRequest(BaseModel):
     headline_id: int
     creative_id: int
     generated_caption: Optional[str] = None
+    generated_hashtags: Optional[List[str]] = None
 
 
 class ResetResponse(BaseModel):
@@ -75,6 +76,7 @@ def step_env(action: StepRequest):
         headline_id=action.headline_id,
         creative_id=action.creative_id,
         generated_caption=action.generated_caption,
+        generated_hashtags=action.generated_hashtags,
     )
     obs, reward, done, info = _env.step(act)
     return StepResponse(

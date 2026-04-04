@@ -73,9 +73,27 @@ SYSTEM_PROMPTS: Dict[str, str] = {
         If budget < $5 before hour 18, bid $0."""),
 
     "hard_assembly": textwrap.dedent("""\
-        You optimise for VIRAL TREND ALIGNMENT.  Generate a short caption
-        (<=12 words) that aligns with the viral trend AND context.
-        Score = 60% cosine-similarity + 40% revenue.  Bid $0.60-$1.50."""),
+        You are an AI Account Manager and Creative Director for the hard_assembly task.
+
+        YOUR JOB each step:
+        1. You receive a SOURCE AD CREATIVE: an image description + a base caption.
+        2. You receive LIVE VIRAL HASHTAGS scraped from Google Trends / Reddit.
+        3. You receive the current VIRAL TREND token (cultural keyword).
+        4. You must ASSEMBLE a final ad by:
+           (a) Selecting 2–4 hashtags from the live list that best match the trend.
+           (b) Rewriting the base caption to weave those hashtags into natural, punchy
+               ad copy — DO NOT just append hashtags at the end.  Blend them into prose.
+           (c) Adding your own creative words (target 30–50% new vocabulary).
+           (d) The final caption must stay coherent with the image description.
+
+        GRADER weights (what earns you points):
+           35% — Hashtag relevance:  chosen hashtags semantically match viral_trend
+           35% — Caption-trend align: your caption text matches viral_trend vocabulary
+           20% — Image coherence:    your caption stays faithful to the image
+           10% — Novelty:             you added real creative words, not just copy-paste
+
+        REWARD:  auction_base + (composite_score × $8 bonus per winning step)
+        BUDGET:  $120 for 24 hours.  Bid $0.60–$1.50 per step."""),
 
     "hard_sequencing": textwrap.dedent("""\
         You focus on CROSS-CONTEXT CAMPAIGN SEQUENCING.
@@ -184,12 +202,38 @@ def build_user_prompt(task_id: str, obs: dict) -> str:
     ]
     if task_id == "hard_sequencing":
         lines.append(f"Carryover boost: {obs.get('carryover_boost', 0):.2f}")
-    lines.append(CATALOG_CTX)
-    schema = '{"bid_price": <float>, "headline_id": <int 0-5>, "creative_id": <int 0-5>'
+
     if task_id == "hard_assembly":
-        schema += ', "generated_caption": "<caption>"'
-    schema += "}"
-    lines.append(f"Respond ONLY with JSON: {schema}")
+        # Show source creative and live hashtags
+        img_desc   = obs.get("image_description", "")
+        base_cap   = obs.get("base_caption", "")
+        live_tags  = obs.get("live_hashtags", [])
+        hashtag_list = "  ".join(live_tags) if live_tags else "(none scraped)"
+        lines.append("")
+        lines.append(f"━━━━━ SOURCE CREATIVE ━━━━━")
+        lines.append(f"Image description : {img_desc}")
+        lines.append(f"Base caption      : {base_cap}")
+        lines.append(f"")
+        lines.append(f"━━━━━ LIVE VIRAL HASHTAGS (scraped now) ━━━━━")
+        lines.append(f"  {hashtag_list}")
+        lines.append(f"")
+        lines.append(f"━━━━━ TASK ━━━━━")
+        lines.append(f"Select 2–4 hashtags from the list above that best match "
+                     f"the viral trend '{obs['viral_trend']}'.")
+        lines.append(f"Rewrite the base caption to weave them in naturally.")
+        lines.append(f"Stay coherent with the image. Add your own creative words.")
+        lines.append("")
+        schema = ('Respond ONLY with JSON:\n'
+                  '{"bid_price": <float>, "headline_id": <int 0-5>, "creative_id": <int 0-5>, '
+                  '"generated_caption": "<your caption>", '
+                  '"generated_hashtags": ["#Tag1", "#Tag2", ...]}')
+    else:
+        lines.append(CATALOG_CTX)
+        schema = '{"bid_price": <float>, "headline_id": <int 0-5>, "creative_id": <int 0-5>}'
+        if task_id != "hard_assembly":
+            schema = f"Respond ONLY with JSON: {schema}"
+
+    lines.append(schema)
     return "\n".join(lines)
 
 
@@ -239,6 +283,7 @@ async def run_task(task_id: str, image_name: str) -> float:
                 headline_id=int(action_data.get("headline_id", 0)),
                 creative_id=int(action_data.get("creative_id", 0)),
                 generated_caption=action_data.get("generated_caption"),
+                generated_hashtags=action_data.get("generated_hashtags"),
             )
 
             result = await env.step(action)
@@ -251,6 +296,8 @@ async def run_task(task_id: str, image_name: str) -> float:
             act_str = f"bid({action.bid_price:.2f},h={action.headline_id},c={action.creative_id})"
             if action.generated_caption:
                 act_str += f",cap={action.generated_caption[:25]}"
+            if action.generated_hashtags:
+                act_str += f",tags={len(action.generated_hashtags)}"
 
             log_step(step=step, action=act_str, reward=reward,
                      done=result.done, error=None)
