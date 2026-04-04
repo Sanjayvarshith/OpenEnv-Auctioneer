@@ -79,6 +79,9 @@ IPINYOU_PATH = DATA_DIR
 
 # MIND (Microsoft News Dataset) — replaces Criteo + Pitt
 MIND_PATH        = DATA_DIR / "MINDlarge_train"
+if not (MIND_PATH / "behaviors.tsv").exists() and (MIND_PATH / "MINDlarge_train" / "behaviors.tsv").exists():
+    MIND_PATH = MIND_PATH / "MINDlarge_train"
+
 MIND_BEHAVIOURS  = MIND_PATH / "behaviors.tsv"   # impression click log
 MIND_NEWS        = MIND_PATH / "news.tsv"          # news article metadata
 
@@ -896,13 +899,17 @@ class HardAssemblyGrader:
         self._model  = semantic_model
         self._scores: List[float] = []
 
-    def score_step(self, caption: str, viral_trend: str) -> float:
+    def score_step(self, caption: str, viral_trend: str, image_desc: str) -> float:
         cap_emb   = self._model.encode(caption,      convert_to_tensor=True)
         trend_emb = self._model.encode(viral_trend,  convert_to_tensor=True)
-        cos       = float(util.cos_sim(cap_emb, trend_emb).item())
-        step_score = float(np.clip(cos, 0.0, 1.0))
+        img_emb   = self._model.encode(image_desc,   convert_to_tensor=True)
+        
+        cos_trend = float(np.clip(util.cos_sim(cap_emb, trend_emb).item(), 0.0, 1.0))
+        cos_img   = float(np.clip(util.cos_sim(cap_emb, img_emb).item(), 0.0, 1.0))
+        
+        step_score = (0.35 * cos_trend + 0.20 * cos_img) / 0.55
         self._scores.append(step_score)
-        return step_score
+        return round(step_score, 4)
 
     def episode_score(self) -> float:
         if not self._scores:
@@ -1040,6 +1047,103 @@ class HardSequencingGrader:
 # Main Environment
 # ===========================================================================
 
+import urllib.request
+    
+class ViralHashtagScraper:
+    """
+    Pulls live hashtags from Reddit /r/popular and uses fallback static seeds
+    per context/trend if the network fails.
+    """
+    _SEEDS = {
+        "Fitness": ["#workout", "#fitlife", "#health", "#gym", "#motivation"],
+        "Tech": ["#tech", "#gadgets", "#innovation", "#future", "#software"],
+        "Fashion": ["#style", "#ootd", "#fashion", "#beauty", "#trendy"],
+        "Gaming": ["#esports", "#gaming", "#gamer", "#streamer", "#play"],
+    }
+    
+    def scrape(self, context: str, trend: str) -> list[str]:
+        tags = list(self._SEEDS.get(context, ["#viral"]))
+        tags.extend([f"#{trend.replace(' ', '').lower()}"])
+        try:
+            req = urllib.request.Request("https://www.reddit.com/r/popular/hot.json?limit=10", headers={'User-Agent': 'OpenEnvAuctioneer/1.0'})
+            with urllib.request.urlopen(req, timeout=3) as resp:
+                data = json.loads(resp.read().decode())
+                for child in data.get("data", {}).get("children", []):
+                    title = child["data"].get("title", "")
+                    for w in title.split():
+                        if len(w) > 5 and w.isalpha():
+                            tags.append(f"#{w.lower()}")
+        except Exception:
+            pass
+        
+        tags = list(set(tags))
+        random.shuffle(tags)
+        return tags[:10]
+
+class AdCaptionDataset:
+    """
+    Loads MS-COCO Captions from HuggingFace dataset 'shunk031/MSCOCO'.
+    Buckets images by context using keyword matching.
+    """
+    _CONTEXT_KEYWORDS = {
+        "Fitness": ["run", "sport", "bike", "tennis", "baseball", "surf", "snowboard", "ski", "gym", "jump"],
+        "Tech": ["computer", "laptop", "phone", "tv", "remote", "screen", "keyboard"],
+        "Fashion": ["suit", "dress", "shirt", "tie", "bag", "umbrella", "shoe"],
+        "Gaming": ["game", "play", "controller", "tv", "video"],
+    }
+    
+    def __init__(self):
+        self._buckets = {ctx: [] for ctx in self._CONTEXT_KEYWORDS}
+        self._fallback = {
+            "Fitness": [("A runner in the park.", "Start your fitness journey today.")],
+            "Tech": [("A modern laptop on a desk.", "Upgrade your setup with the latest tech.")],
+            "Fashion": [("A model wearing a stylish dress.", "Elevate your wardrobe.")],
+            "Gaming": [("A person holding a game controller.", "Level up your experience.")],
+        }
+
+    def load(self):
+        try:
+            import json, os
+            from collections import defaultdict
+            path = "Datasets/Coco/coco128/coco128_captions.json"
+            print(f"[AdCaptionDataset] Loading local COCO file: {path} ...")
+            if not os.path.exists(path):
+                raise FileNotFoundError(f"Missing {path}")
+                
+            with open(path, "r") as f:
+                data = json.load(f)
+                
+            grouped = defaultdict(list)
+            for ann in data.get("annotations", []):
+                grouped[ann["image_id"]].append(ann["caption"])
+                
+            for img_id, texts in grouped.items():
+                if not texts:
+                    continue
+                
+                if len(texts) == 1:
+                    t1, t2 = texts[0], texts[0]
+                else:
+                    t1, t2 = texts[0], texts[1]
+                
+                texts_lower = texts[0].lower()
+                for ctx, kws in self._CONTEXT_KEYWORDS.items():
+                    if any(kw in texts_lower for kw in kws):
+                        self._buckets[ctx].append((t1, t2))
+                        break
+            
+            stats = {k: len(v) for k, v in self._buckets.items()}
+            print(f"[AdCaptionDataset] Dataset loaded. Buckets: {stats}")
+        except Exception as exc:
+            print(f"[AdCaptionDataset] Could not load dataset: {exc} -> using fallback.")
+            self._buckets = self._fallback
+
+    def sample(self, context: str) -> tuple[str, str]:
+        pool = self._buckets.get(context, [])
+        if not pool:
+            pool = self._fallback.get(context, [("A standard image.", "A standard caption.")])
+        return random.choice(pool)
+
 class OpenEnvAuctioneer:
     """
     Gym-style RL environment.
@@ -1080,6 +1184,8 @@ class OpenEnvAuctioneer:
         self._ctr_cal    = CTRCalibrator(self._mind);   self._ctr_cal.calibrate()
         self._pool       = CreativePool(self._mind, self._ctr_cal); self._pool.load()
         self._personas   = PersonaBank();               self._personas.load()
+        self._ad_dataset = AdCaptionDataset();          self._ad_dataset.load()
+        self._hashtag_scraper = ViralHashtagScraper()
 
         # ── Simulation layers ──────────────────────────────────────────────
         self._user_sim   = UserSimulator(self._personas, self._pool, self._ctr_cal)
@@ -1219,7 +1325,7 @@ class OpenEnvAuctioneer:
             caption_text = (action.generated_caption
                             if action.generated_caption
                             else self._pool.headlines.get(action.headline_id, ""))
-            clip_score = self._hard_grader.score_step(caption_text, self._trend)
+            clip_score = self._hard_grader.score_step(caption_text, self._trend, getattr(self, "_last_image_desc", ""))
         else:
             clip_score = 0.0
 
@@ -1256,21 +1362,29 @@ class OpenEnvAuctioneer:
         best_slot = self._pool.best_headline_for_context(self._context)
         news_subcat = self._pool.slot_subcat.get(best_slot, "")
 
-        return Observation(
-            hour_of_day           = min(self._step, 23),
-            remaining_budget      = round(self._remaining, 2),
-            spent_so_far          = round(self._budget_init - self._remaining, 2),
-            current_context       = self._context,
-            news_category         = news_subcat,
-            viral_trend           = self._trend,
-            market_pressure       = self._market.market_pressure(
-                                        min(self._step, 23)),
-            ads_shown_this_session= self._ads_shown,
-            fatigue_level         = round(self._fatigue, 3),
-            carryover_boost       = round(min(self._carryover_boost, 0.30), 4),
-            last_ctr              = self._last_ctr,
-            cumulative_revenue    = round(self._total_revenue, 2),
-        )
+        obs_kwargs = {
+            "hour_of_day":          min(self._step, 23),
+            "remaining_budget":     round(self._remaining, 2),
+            "spent_so_far":         round(self._budget_init - self._remaining, 2),
+            "current_context":      self._context,
+            "news_category":        news_subcat,
+            "viral_trend":          self._trend,
+            "market_pressure":      self._market.market_pressure(min(self._step, 23)),
+            "ads_shown_this_session": self._ads_shown,
+            "fatigue_level":        round(self._fatigue, 3),
+            "carryover_boost":      round(min(self._carryover_boost, 0.30), 4),
+            "last_ctr":             self._last_ctr,
+            "cumulative_revenue":   round(self._total_revenue, 2),
+        }
+        
+        if self.task_id == "hard_assembly":
+            img_desc, base_cap = self._ad_dataset.sample(self._context)
+            obs_kwargs["image_description"] = img_desc
+            obs_kwargs["base_caption"] = base_cap
+            obs_kwargs["live_hashtags"] = self._hashtag_scraper.scrape(self._context, self._trend)
+            self._last_image_desc = img_desc
+            
+        return Observation(**obs_kwargs)
 
     def _make_info(self, clearing_price: float, raw_ctr: float,
                    auction_won: bool, adjusted_ctr: float,

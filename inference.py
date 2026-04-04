@@ -121,7 +121,7 @@ class AuctioneerEnvClient:
         self.base_url = base_url.rstrip("/")
         self.container_id = container_id
         self.task_id = task_id
-        self._client = httpx.AsyncClient(timeout=60.0)
+        self._client = httpx.AsyncClient(timeout=300.0)
 
     @classmethod
     async def from_docker_image(cls, image_name: str,
@@ -131,14 +131,20 @@ class AuctioneerEnvClient:
             s.bind(("", 0))
             port = s.getsockname()[1]
 
-        container_id = subprocess.check_output([
-            "docker", "run", "-d", "--rm",
-            "-p", f"{port}:7860",
-            image_name,
-        ]).decode().strip()
-
-        base_url = f"http://localhost:{port}"
-        inst = cls(base_url=base_url, container_id=container_id, task_id=task_id)
+        if os.getenv("NO_DOCKER"):
+            proc = subprocess.Popen(["uvicorn", "app:app", "--port", str(port)])
+            container_id = "local_uvicorn"
+            base_url = f"http://localhost:{port}"
+            inst = cls(base_url=base_url, container_id=container_id, task_id=task_id)
+            inst.proc = proc
+        else:
+            container_id = subprocess.check_output([
+                "docker", "run", "-d", "--rm",
+                "-p", f"{port}:7860",
+                image_name,
+            ]).decode().strip()
+            base_url = f"http://localhost:{port}"
+            inst = cls(base_url=base_url, container_id=container_id, task_id=task_id)
 
         # Wait for the server to become ready
         for _ in range(90):
@@ -170,8 +176,11 @@ class AuctioneerEnvClient:
     async def close(self):
         await self._client.aclose()
         if self.container_id:
-            subprocess.run(["docker", "stop", self.container_id],
-                           capture_output=True)
+            if getattr(self, "proc", None):
+                self.proc.terminate()
+            else:
+                subprocess.run(["docker", "stop", self.container_id],
+                               capture_output=True)
 
 
 # ── STDOUT logging helpers (MANDATORY format) ────────────────────────────────

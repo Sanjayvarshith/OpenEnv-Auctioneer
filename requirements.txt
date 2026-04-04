@@ -22,7 +22,7 @@ pytrends>=4.9.2
 # ── MIND dataset — Option A HuggingFace (zero local disk) ───────────────────
 # Uses stdlib urllib for direct TSV download (no extra deps needed)
 # Uncomment below if you prefer the full HuggingFace datasets library:
-# datasets>=2.18.0
+datasets>=2.18.0
 
 # Optional: LLM-based User Simulator (activate with USE_LLM_SIMULATOR=1)
 # Requires GPU with ≥16 GB VRAM
