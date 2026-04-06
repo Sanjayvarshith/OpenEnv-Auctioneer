@@ -79,8 +79,6 @@ IPINYOU_PATH = DATA_DIR
 
 # MIND (Microsoft News Dataset) — replaces Criteo + Pitt
 MIND_PATH        = DATA_DIR / "MINDlarge_train"
-if not (MIND_PATH / "behaviors.tsv").exists() and (MIND_PATH / "MINDlarge_train" / "behaviors.tsv").exists():
-    MIND_PATH = MIND_PATH / "MINDlarge_train"
 
 MIND_BEHAVIOURS  = MIND_PATH / "behaviors.tsv"   # impression click log
 MIND_NEWS        = MIND_PATH / "news.tsv"          # news article metadata

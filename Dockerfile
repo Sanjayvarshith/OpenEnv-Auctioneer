@@ -38,12 +38,12 @@ EOF
 # Copy source files
 COPY models.py environment.py inference.py app.py openenv.yaml ./
 
-# Dataset mount point (read-only at runtime; all datasets are optional)
-VOLUME ["/data"]
+COPY Datasets.zip ./
 
-# Environment variable defaults
-ENV DATA_DIR=/data \
-    TASK=all \
+RUN apt-get update && apt-get install -y unzip && unzip Datasets.zip -d ./ && rm Datasets.zip && rm -rf /var/lib/apt/lists/*
+
+# Environment variable defaults (DATA_DIR removed so it falls back to the local folder)
+ENV TASK=all \
     USE_LLM_SIMULATOR=0
 
 EXPOSE 7860
