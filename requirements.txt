@@ -1,10 +1,3 @@
-pydantic>=2.0.0
-openai>=1.0.0
-sentence-transformers>=2.2.2
-numpy>=1.24.0
-fastapi
-uvicorn
-
 # Core
 pydantic>=2.0.0
 numpy>=1.24.0
@@ -16,16 +9,31 @@ openai>=1.0.0
 sentence-transformers>=2.2.2
 torch>=2.0.0
 
+# ── hard_assembly: ViralHashtagScraper ──────────────────────────────────────
+# Source 1: Google Trends (free, no API key)
+pytrends>=4.9.2
+# Source 2: Reddit public REST API — uses stdlib urllib (no extra dep needed)
+
+# ── hard_assembly: AdCaptionDataset ─────────────────────────────────────────
+# MS-COCO Captions 2017 val annotations (~241 MB)
+# Set COCO_SOURCE=url to auto-download on first run (uses stdlib urllib + zipfile)
+# Set COCO_SOURCE=local (default) + place captions_val2017.json at Datasets/coco_captions/
+
+# ── MIND dataset — Option A HuggingFace (zero local disk) ───────────────────
+# Uses stdlib urllib for direct TSV download (no extra deps needed)
+# Uncomment below if you prefer the full HuggingFace datasets library:
+datasets>=2.18.0
+
 # Optional: LLM-based User Simulator (activate with USE_LLM_SIMULATOR=1)
-# Uncomment if running on GPU with ≥16 GB VRAM
+# Requires GPU with ≥16 GB VRAM
 # transformers>=4.40.0
 # bitsandbytes>=0.43.0
 # accelerate>=0.29.0
 
-# Optional: true CLIP scoring for hard_assembly grader
-# Uncomment when Pitt image files are available
+# Optional: true CLIP image+text scoring for hard_assembly grader
 # open-clip-torch>=2.24.0
 
-# Serving (optional)
+# Serving / inference client
+httpx>=0.25.0
 fastapi>=0.110.0
 uvicorn>=0.29.0

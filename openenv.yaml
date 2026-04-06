@@ -1,5 +1,5 @@
 name: "openenv-auctioneer"
-version: "0.2.0"
+version: "0.3.0"
 description: >
   An RL agent acts as an autonomous "Account Manager," navigating a 24-hour
   RTB auction cycle and assembling contextual ad creatives to maximise ROAS —
@@ -53,10 +53,69 @@ tasks:
       score_range: [0.0, 1.0]
       target_score: 0.65
 
+  - id: "hard_sequencing"
+    difficulty: "hard"
+    initial_budget_usd: 100.0
+    description: >
+      Plan a 24-hour sequence of ad placements across Fitness, Tech, Fashion,
+      and Gaming contexts. Winning an auction triggers carry-over brand-recall
+      boosts (+15%/+10%/+5% CTR) for the next 3 hours. Cover >=3 contexts for
+      a 20% diversity bonus. Graded against DP oracle.
+    grader:
+      type: "HardSequencingGrader"
+      formula: "min(1.0, (agent_conversions / oracle_conversions) x diversity_multiplier)"
+      components:
+        agent_conversions:      "sum(adjusted_ctr x conversion_value) for won auctions"
+        oracle_conversions:     "DP-optimal bid/skip sequence with carry-over"
+        diversity_multiplier:   "1.2 if >=3 distinct contexts served, else 1.0"
+      score_range: [0.0, 1.0]
+      target_score: 0.60
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Datasets
 # ─────────────────────────────────────────────────────────────────────────────
 datasets:
+
+  - name: "MIND — Microsoft News Dataset"
+    role: "CTR calibration (behaviours.tsv) + Creative Pool headlines (news.tsv)"
+    source: "https://msnews.github.io/"
+    split: "MIND-small (train)"
+    files:
+      - behaviours.tsv   # impression logs: impression_id, user_id, time, history, impressions
+      - news.tsv         # article metadata: news_id, category, subcategory, title, abstract
+    size_approx: "~70 MB (MIND-small train split)"
+    required: false      # falls back to Wu et al. 2020 benchmark CTRs
+
+    hosting_options:
+      option_A_huggingface:
+        description: "Stream directly — zero local disk needed"
+        env_vars:
+          MIND_SOURCE: "huggingface"
+        notes: >
+          behaviours.tsv and news.tsv are downloaded once from HuggingFace Hub
+          and cached under DATA_DIR/mind/. ~70 MB download on first run.
+          Subsequent runs use the cached files.
+
+      option_B_azure_blob:
+        description: "Host the MIND zip on your own Azure Blob container"
+        env_vars:
+          MIND_SOURCE: "azure"
+          MIND_AZURE_SAS_URL: "https://<account>.blob.core.windows.net/<container>/MINDsmall_train.zip?<SAS>"
+        notes: >
+          Upload MINDsmall_train.zip to an Azure Blob container, generate a
+          SAS URL (read-only, no expiry or long TTL), set the env var.
+          Recommended if you need air-gapped or private deployment.
+          Cost: ~$0.002/month storage + egress per run.
+
+      option_C_local_mount:
+        description: "Pre-downloaded files on local disk (default)"
+        env_vars:
+          MIND_SOURCE: "local"   # (or leave unset)
+          DATA_DIR: "/data"
+        notes: >
+          Download MIND-small from https://msnews.github.io/ (requires account).
+          Extract so that /data/mind/behaviours.tsv and /data/mind/news.tsv exist.
+          Mount as Docker volume: -v /host/mind:/data/mind
 
   - name: "iPinYou Global RTB"
     role: "Market Engine calibration (per-hour Lognormal bid distribution)"
@@ -64,23 +123,7 @@ datasets:
     mount_path: "/data/ipinyou"
     format: "CSV (bid_id, timestamp, bidprice, payprice, …)"
     size_approx: "~250 MB (subsampled)"
-    required: false        # falls back to analytic approximation if absent
-
-  - name: "Criteo 1TB Click Logs"
-    role: "Baseline CTR lookup table per content category"
-    source: "https://ailab.criteo.com/criteo-1tb-click-logs-dataset/"
-    mount_path: "/data/criteo/sampled_clicks.csv"
-    format: "TSV (label, int_feat×13, cat_feat×26)"
-    size_approx: "~100 MB (subsampled)"
-    required: false
-
-  - name: "Pitt Image Ads"
-    role: "Creative pool — image descriptions and headlines"
-    source: "https://people.cs.pitt.edu/~kovashka/ads/"
-    mount_path: "/data/pitt_ads/ads_metadata.json"
-    format: "JSON [{id, headline, image_desc, category}, …]"
-    size_approx: "~2 GB (64k ads; only metadata JSON needed at runtime)"
-    required: false
+    required: false        # falls back to analytic approximation (Zhang et al. 2014)
 
   - name: "Vogue Dialogue Dataset"
     role: "User Simulator persona bank"
