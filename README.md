@@ -1,6 +1,5 @@
 ---
 title: OpenEnv Creative Auctioneer
-emoji: 🎯
 colorFrom: purple
 colorTo: blue
 sdk: docker
@@ -93,7 +92,7 @@ Rewards are **per-step** (not sparse), providing continuous gradient signal.
 **Objective:** Pace $50 across 24 hours; retain ≥ 20% for peak hours (18–22).
 **Budget:** $50 | **Grader:** `0.3×smoothness + 0.3×peak_survival + 0.4×revenue` | **Target:** 0.70
 
-### Level 3 — `hard_assembly` (Hard) 🔥
+### Level 3 — `hard_assembly` (Hard) 
 **Objective:** Given an ad image description + base caption + live viral hashtags,
 **generate a new caption** that is simultaneously viral, coherent with the image,
 and creatively novel — while also winning auctions profitably.
