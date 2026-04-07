@@ -40,9 +40,14 @@ RUN python -c 'from sentence_transformers import SentenceTransformer; SentenceTr
 # Copy source files
 COPY models.py environment.py inference.py app.py openenv.yaml ./
 
-COPY Datasets.zip ./
-
-RUN apt-get update && apt-get install -y unzip && unzip Datasets.zip -d ./ && rm Datasets.zip && rm -rf /var/lib/apt/lists/*
+# Download the zip file directly (requires a direct download URL, not a folder sharing link)
+# Download dataset using gdown (RELIABLE)
+RUN apt-get update && apt-get install -y unzip && \
+    pip install --no-cache-dir gdown && \
+    gdown https://drive.google.com/uc?id=1-L8LCTSjjQs9qFdnIzFdnf0J37Yf6cxm -O Datasets.zip && \
+    unzip Datasets.zip -d ./ && \
+    rm Datasets.zip && \
+    rm -rf /var/lib/apt/lists/*
 
 # Environment variable defaults (DATA_DIR removed so it falls back to the local folder)
 ENV TASK=all \

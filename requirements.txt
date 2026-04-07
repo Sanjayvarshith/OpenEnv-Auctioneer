@@ -37,3 +37,4 @@ datasets>=2.18.0
 httpx>=0.25.0
 fastapi>=0.110.0
 uvicorn>=0.29.0
+openenv-core
