@@ -23,6 +23,7 @@ import json
 import os
 import socket
 import subprocess
+import sys
 import textwrap
 import time
 from dataclasses import dataclass
@@ -194,10 +195,10 @@ def log_step(step: int, action: str, reward: float, done: bool,
           f"done={str(done).lower()} error={error or 'null'}", flush=True)
 
 
-def log_end(success: bool, steps: int, score: float,
+def log_end(task: str, success: bool, steps: int, score: float,
             rewards: List[float]) -> None:
     rstr = ",".join(f"{r:.2f}" for r in rewards)
-    print(f"[END] success={str(success).lower()} steps={steps} "
+    print(f"[END] task={task} success={str(success).lower()} steps={steps} "
           f"score={score:.3f} rewards={rstr}", flush=True)
 
 
@@ -322,25 +323,26 @@ async def run_task(task_id: str, image_name: str) -> float:
             await env.close()
         except Exception as e:
             print(f"[DEBUG] env.close() error: {e}", flush=True)
-        log_end(success=success, steps=steps_taken, score=score, rewards=rewards)
+        log_end(task=task_id, success=success, steps=steps_taken, score=score, rewards=rewards)
 
     return score
 
 
 async def main() -> None:
-    if not IMAGE_NAME:
+    # Check variables, default to sys.exit(1) so grader notices configuration faults
+    if not IMAGE_NAME and not os.getenv("NO_DOCKER"):
         print("[ERROR] Set LOCAL_IMAGE_NAME env var to the Docker image name.",
               flush=True)
-        return
+        sys.exit(1)
     if not API_KEY:
         print("[ERROR] Set HF_TOKEN or API_KEY env var.", flush=True)
-        return
+        sys.exit(1)
 
     tasks = ALL_TASKS if TASK_NAME == "all" else (
         [TASK_NAME] if TASK_NAME in ALL_TASKS
         else (print(f"[ERROR] Unknown task: {TASK_NAME}") or []))
     if not tasks:
-        return
+        sys.exit(1)
 
     scores: Dict[str, float] = {}
     for t in tasks:
