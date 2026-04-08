@@ -24,6 +24,16 @@ app = FastAPI(title="OpenEnv Creative Auctioneer", version="0.4.0")
 _env: Optional[OpenEnvAuctioneer] = None
 
 
+@app.on_event("startup")
+def preload_env():
+    global _env
+    print("[Startup] Preloading OpenEnv ML models and datasets...")
+    # Initialize the default task so downloading and caching happens immediately
+    _env = OpenEnvAuctioneer(task_id="easy_headline")
+    _env.reset()
+    print("[Startup] Caching complete!")
+
+
 # ---------------------------------------------------------------------------
 # Request / Response schemas
 # ---------------------------------------------------------------------------
@@ -60,7 +70,9 @@ def health():
 @app.post("/reset", response_model=ResetResponse)
 def reset_env(task_id: str = Query("easy_headline")):
     global _env
-    _env = OpenEnvAuctioneer(task_id=task_id)
+    # Avoid re-initializing if task hasn't changed. This saves time!
+    if _env is None or getattr(_env, "task_id", None) != task_id:
+        _env = OpenEnvAuctioneer(task_id=task_id)
     obs = _env.reset()
     return ResetResponse(observation=obs.model_dump(), done=False)
 
