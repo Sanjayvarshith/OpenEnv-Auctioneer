@@ -36,6 +36,7 @@ from models import Action
 
 # ── Configuration from env vars ──────────────────────────────────────────────
 IMAGE_NAME = os.getenv("LOCAL_IMAGE_NAME")
+ENV_URL = os.getenv("ENV_URL") or os.getenv("SPACE_URL") or os.getenv("PING_URL")
 API_KEY = os.getenv("HF_TOKEN") or os.getenv("API_KEY")
 API_BASE_URL = os.getenv("API_BASE_URL", "https://router.huggingface.co/v1")
 MODEL_NAME = os.getenv("MODEL_NAME", "Qwen/Qwen2.5-72B-Instruct")
@@ -123,6 +124,22 @@ class AuctioneerEnvClient:
         self.container_id = container_id
         self.task_id = task_id
         self._client = httpx.AsyncClient(timeout=300.0)
+
+    @classmethod
+    async def from_url(cls, url: str, task_id: str = "easy_headline"):
+        """Connect directly to a remote env server (e.g. HF Space)."""
+        inst = cls(base_url=url.rstrip("/"), container_id=None, task_id=task_id)
+        # Wait for the server to become ready
+        for _ in range(90):
+            try:
+                r = await inst._client.get(f"{inst.base_url}/health")
+                if r.status_code == 200:
+                    print(f"[DEBUG] Connected to remote env at {url}", flush=True)
+                    return inst
+            except Exception:
+                pass
+            await asyncio.sleep(1.0)
+        raise RuntimeError(f"Remote env at {url} did not become ready")
 
     @classmethod
     async def from_docker_image(cls, image_name: str,
@@ -266,9 +283,15 @@ def call_llm(client: OpenAI, system: str, user: str) -> dict:
 
 
 # ── Main episode loop ───────────────────────────────────────────────────────
-async def run_task(task_id: str, image_name: str) -> float:
+async def run_task(task_id: str, image_name: Optional[str] = None,
+                   env_url: Optional[str] = None) -> float:
     llm = OpenAI(base_url=API_BASE_URL, api_key=API_KEY)
-    env = await AuctioneerEnvClient.from_docker_image(image_name, task_id=task_id)
+    if env_url:
+        env = await AuctioneerEnvClient.from_url(env_url, task_id=task_id)
+    elif image_name:
+        env = await AuctioneerEnvClient.from_docker_image(image_name, task_id=task_id)
+    else:
+        raise RuntimeError("No env_url or image_name provided")
 
     rewards: List[float] = []
     steps_taken = 0
@@ -329,11 +352,16 @@ async def run_task(task_id: str, image_name: str) -> float:
 
 
 async def main() -> None:
-    # Check variables, default to sys.exit(1) so grader notices configuration faults
-    if not IMAGE_NAME and not os.getenv("NO_DOCKER"):
-        print("[ERROR] Set LOCAL_IMAGE_NAME env var to the Docker image name.",
-              flush=True)
-        sys.exit(1)
+    # Allow connecting to a remote URL (HF Space), local Docker image, or default localhost
+    env_url = ENV_URL
+    image_name = IMAGE_NAME
+
+    # If neither ENV_URL nor LOCAL_IMAGE_NAME is set, auto-detect running env on localhost
+    if not image_name and not env_url and not os.getenv("NO_DOCKER"):
+        # Fallback: assume env is already running on localhost:7860 (Docker default)
+        env_url = "http://localhost:7860"
+        print(f"[DEBUG] No LOCAL_IMAGE_NAME or ENV_URL set, defaulting to {env_url}", flush=True)
+
     if not API_KEY:
         print("[ERROR] Set HF_TOKEN or API_KEY env var.", flush=True)
         sys.exit(1)
@@ -346,7 +374,7 @@ async def main() -> None:
 
     scores: Dict[str, float] = {}
     for t in tasks:
-        scores[t] = await run_task(t, IMAGE_NAME)
+        scores[t] = await run_task(t, image_name=image_name, env_url=env_url)
 
     # ── Summary ──────────────────────────────────────────────────────────
     print("\n" + "=" * 52)
