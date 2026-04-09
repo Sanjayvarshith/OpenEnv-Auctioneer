@@ -1425,6 +1425,9 @@ class OpenEnvAuctioneer:
             _ctx_cov   = 0
             _div_mult  = 1.0
 
+        # Clamp task_score to strictly (0, 1) — validator rejects 0.0 and 1.0
+        task_score = float(np.clip(task_score, 0.001, 0.999))
+
         return Info(
             task_id                 = self.task_id,
             current_step            = self._step,

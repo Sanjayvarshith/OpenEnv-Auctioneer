@@ -391,7 +391,9 @@ async def run_task(task_id: str, image_name: Optional[str] = None,
             if result.done:
                 break
 
-        score = result.info.get("task_score", 0.0) if isinstance(result.info, dict) else 0.0
+        score = result.info.get("task_score", 0.001) if isinstance(result.info, dict) else 0.001
+        # Clamp score to strictly (0, 1) — validator rejects 0.0 and 1.0
+        score = max(0.001, min(0.999, score))
         success = score >= SUCCESS_THRESHOLDS.get(task_id, 0.5)
 
     except Exception as exc:
@@ -439,7 +441,7 @@ async def main() -> None:
             print(f"[DEBUG] Task {t} failed with exception: {exc}", flush=True)
             import traceback
             traceback.print_exc()
-            scores[t] = 0.0
+            scores[t] = 0.001  # Use 0.001 instead of 0.0 — validator requires strictly (0, 1)
 
     # ── Summary ──────────────────────────────────────────────────────────
     print("\n" + "=" * 52)
